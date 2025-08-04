@@ -5,7 +5,7 @@ find_package(OpenGL REQUIRED)
 find_package(glfw3 CONFIG REQUIRED)
 find_package(glad CONFIG REQUIRED)
 
-add_executable(smooth_voxel_renderer src/config.h src/main.cpp )
+add_executable(smooth_voxel_renderer src/config.h src/main.cpp  "src/Camera.h")
 
 target_link_libraries(smooth_voxel_renderer
     PRIVATE
