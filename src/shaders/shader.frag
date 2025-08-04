@@ -55,7 +55,7 @@ void main()
     vec3 tMaxVoxel = ( (vec3(currentVoxel) + max(vec3(0.0), vec3(rayStep)) ) - currentPos) * invDir;
 
 
-    // --- 3. The Main Traversal Loop ---
+    // --- 3. Main Traversal Loop ---
     vec3 hitNormal = vec3(0.0);
     for(int i = 0; i < MAX_STEPS; ++i) {
 

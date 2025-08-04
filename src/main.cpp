@@ -112,7 +112,7 @@ void processInput(GLFWwindow* window)
         camera.ProcessKeyboard(DOWN, deltaTime);
 
     // Rotation
-    float rotationSpeed = 2.5f; // A constant speed for arrow keys
+    float rotationSpeed = 2.5f; // constant speed for arrow keys
     if (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS)
         camera.ProcessMouseMovement(-rotationSpeed, 0);
     if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS)
@@ -201,11 +201,10 @@ void setupQuad() {
     glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
 
     // Set up the vertex attribute pointer
-    // This tells OpenGL how to interpret the vertex data in the VBO
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(0); // Enable layout (location = 0)
 
-    // Unbind the VBO and VAO (good practice)
+    // Unbind the VBO and VAO
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
 }
