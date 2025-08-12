@@ -6,7 +6,7 @@ const int GRID_SIZE = 64;
 std::vector<unsigned char> voxelGrid(GRID_SIZE* GRID_SIZE* GRID_SIZE, 0);
 unsigned int voxelTexture;
 
-// --- camera object ---
+// --- camera ---
 Camera camera(glm::vec3(GRID_SIZE * 1.5f, GRID_SIZE * 1.5f, GRID_SIZE * 1.5f));
 
 // --- timing ---
@@ -20,9 +20,11 @@ void setupQuad();
 void setupVoxelGrid();
 void setupVoxelTexture();
 void processInput(GLFWwindow* window);
+void precomputeSDF();
 
 int main()
 {
+    // --- setup ---
     GLFWwindow* window;
 
     if (!glfwInit()) {
@@ -43,15 +45,17 @@ int main()
     unsigned int shader = make_shader("src/shaders/shader.vert", "src/shaders/shader.frag");
 
     setupVoxelGrid();
+    precomputeSDF();
     setupVoxelTexture();
     setupQuad();
 
+    // --- rendering ---
     while (!glfwWindowShouldClose(window)) {
         float currentFrame = (float)glfwGetTime();
         deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
 
-        processInput(window); // Process all input
+        processInput(window);
 
         glfwPollEvents();
         glClear(GL_COLOR_BUFFER_BIT);
@@ -72,6 +76,8 @@ int main()
         glUniformMatrix4fv(glGetUniformLocation(shader, "invProjection"), 1, GL_FALSE, glm::value_ptr(invProjection));
         glUniformMatrix4fv(glGetUniformLocation(shader, "invView"), 1, GL_FALSE, glm::value_ptr(invView));
         glUniform3fv(glGetUniformLocation(shader, "cameraPos"), 1, glm::value_ptr(camera.Position));
+        glUniform1i(glGetUniformLocation(shader, "usePlaneFitting"), 1); // 1 on, 0 off
+        glUniform1i(glGetUniformLocation(shader, "neighborhoodSize"), 5); // for a 5x5x5 cube
 
         // bind voxel data texture and draw
         glActiveTexture(GL_TEXTURE0);
@@ -82,7 +88,7 @@ int main()
         glfwSwapBuffers(window);
     }
 
-    // cleanup
+    // --- cleanup ---
     glDeleteVertexArrays(1, &VAO);
     glDeleteBuffers(1, &VBO);
     glDeleteProgram(shader);
@@ -241,4 +247,70 @@ void setupVoxelTexture() {
     // Upload the voxel data. We use GL_RED because we only have one channel (on/off).
     glTexImage3D(GL_TEXTURE_3D, 0, GL_RED, GRID_SIZE, GRID_SIZE, GRID_SIZE, 0,
         GL_RED, GL_UNSIGNED_BYTE, voxelGrid.data());
+}
+
+void precomputeSDF() {
+    std::cout << "Starting surface reconstruction pre-computation..." << std::endl;
+    std::vector<glm::vec3> pointCloud = createPointCloudFromVoxelGrid(voxelGrid, GRID_SIZE);
+    std::cout << "Step 1: Point cloud created with " << pointCloud.size() << " points." << std::endl;
+
+    if (!pointCloud.empty()) {
+        int testPointIndex = 0; // Start by assuming the first point is the one
+        // Loop through the entire point cloud to find the point with the largest X-coordinate
+        for (int i = 1; i < pointCloud.size(); ++i) {
+            if (pointCloud[i].x > pointCloud[testPointIndex].x) {
+                testPointIndex = i;
+            }
+        }
+        std::cout << "Found a test point on the far +X surface." << std::endl;
+        int k = 15;
+        std::vector<int> neighbors = findKNearestNeighbors(pointCloud, testPointIndex, k);
+
+        std::cout << "Step 2: Found " << k << " nearest neighbors for point "
+            << testPointIndex << " ("
+            << pointCloud[testPointIndex].x << ", "
+            << pointCloud[testPointIndex].y << ", "
+            << pointCloud[testPointIndex].z << "):" << std::endl;
+
+        for (int neighborIndex : neighbors) {
+            const auto& point = pointCloud[neighborIndex];
+            std::cout << "  - Point " << neighborIndex << " at ("
+                << point.x << ", " << point.y << ", " << point.z << ")" << std::endl;
+        }
+
+        glm::vec3 centroid = calculateCentroid(pointCloud, neighbors);
+        std::cout << "  - Calculated Centroid: ("
+            << centroid.x << ", " << centroid.y << ", " << centroid.z << ")" << std::endl;
+
+        glm::mat3 covariance = calculateCovarianceMatrix(pointCloud, neighbors, centroid);
+        std::cout << "Step 3: Calculated Covariance Matrix:" << std::endl;
+        std::cout << "  [" << covariance[0][0] << ", " << covariance[1][0] << ", " << covariance[2][0] << "]" << std::endl;
+        std::cout << "  [" << covariance[0][1] << ", " << covariance[1][1] << ", " << covariance[2][1] << "]" << std::endl;
+        std::cout << "  [" << covariance[0][2] << ", " << covariance[1][2] << ", " << covariance[2][2] << "]" << std::endl;
+
+        glm::mat3 eigenvectors;
+        glm::vec3 eigenvalues;
+        findEigenvectors(covariance, eigenvectors, eigenvalues);
+
+        std::cout << "Step 4: Eigendecomposition Results:" << std::endl;
+        std::cout << "  - Eigenvalue 0: " << eigenvalues[0] << ", Eigenvector: (" << eigenvectors[0].x << ", " << eigenvectors[0].y << ", " << eigenvectors[0].z << ")" << std::endl;
+        std::cout << "  - Eigenvalue 1: " << eigenvalues[1] << ", Eigenvector: (" << eigenvectors[1].x << ", " << eigenvectors[1].y << ", " << eigenvectors[1].z << ")" << std::endl;
+        std::cout << "  - Eigenvalue 2: " << eigenvalues[2] << ", Eigenvector: (" << eigenvectors[2].x << ", " << eigenvectors[2].y << ", " << eigenvectors[2].z << ")" << std::endl;
+
+        // Find the smallest one to predict the normal
+        int smallestIdx = 0;
+        if (eigenvalues[1] < eigenvalues[smallestIdx]) smallestIdx = 1;
+        if (eigenvalues[2] < eigenvalues[smallestIdx]) smallestIdx = 2;
+        std::cout << "  -> Smallest Eigenvalue is at index " << smallestIdx << ". The normal will be Eigenvector " << smallestIdx << "." << std::endl;
+
+        // ------------------------------------
+
+        std::cout << "\n--- Calculating Tangent Plane for Point " << testPointIndex << " ---" << std::endl;
+        TangentPlane plane = calculateTangentPlaneForPoint(pointCloud, testPointIndex, k);
+
+        std::cout << "Result -> Centroid: (" << plane.center.x << ", " << plane.center.y << ", " << plane.center.z << ")" << std::endl;
+        std::cout << "Result -> Normal:   (" << plane.normal.x << ", " << plane.normal.y << ", " << plane.normal.z << ")" << std::endl;
+        std::vector<TangentPlane> unorientedPlanes = calculateTangentPlanes(pointCloud, k);
+        std::cout << "Stage 1 Complete: Calculated " << unorientedPlanes.size() << " unoriented tangent planes." << std::endl;
+    }
 }
