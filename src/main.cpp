@@ -218,7 +218,7 @@ void setupQuad() {
 // create sphere in voxel grid
 void setupVoxelGrid() {
     glm::vec3 center(GRID_SIZE / 2.0f);
-    float radius = GRID_SIZE / 4.0f;
+    float radius = GRID_SIZE / 8.0f; // 4.0f for a bigger sphere
 
     for (int z = 0; z < GRID_SIZE; ++z) {
         for (int y = 0; y < GRID_SIZE; ++y) {
@@ -297,13 +297,11 @@ void precomputeSDF() {
         std::cout << "  - Eigenvalue 1: " << eigenvalues[1] << ", Eigenvector: (" << eigenvectors[1].x << ", " << eigenvectors[1].y << ", " << eigenvectors[1].z << ")" << std::endl;
         std::cout << "  - Eigenvalue 2: " << eigenvalues[2] << ", Eigenvector: (" << eigenvectors[2].x << ", " << eigenvectors[2].y << ", " << eigenvectors[2].z << ")" << std::endl;
 
-        // Find the smallest one to predict the normal
         int smallestIdx = 0;
         if (eigenvalues[1] < eigenvalues[smallestIdx]) smallestIdx = 1;
         if (eigenvalues[2] < eigenvalues[smallestIdx]) smallestIdx = 2;
         std::cout << "  -> Smallest Eigenvalue is at index " << smallestIdx << ". The normal will be Eigenvector " << smallestIdx << "." << std::endl;
 
-        // ------------------------------------
 
         std::cout << "\n--- Calculating Tangent Plane for Point " << testPointIndex << " ---" << std::endl;
         TangentPlane plane = calculateTangentPlaneForPoint(pointCloud, testPointIndex, k);
@@ -312,5 +310,31 @@ void precomputeSDF() {
         std::cout << "Result -> Normal:   (" << plane.normal.x << ", " << plane.normal.y << ", " << plane.normal.z << ")" << std::endl;
         std::vector<TangentPlane> unorientedPlanes = calculateTangentPlanes(pointCloud, k);
         std::cout << "Stage 1 Complete: Calculated " << unorientedPlanes.size() << " unoriented tangent planes." << std::endl;
+       
+        std::cout << "\n--- Starting Stage 2: Consistent Tangent Plane Orientation ---" << std::endl;
+        RiemannianGraph graph = buildRiemannianGraph(unorientedPlanes, k);
+        std::cout << "Stage 2 Part 1: Riemannian Graph created." << std::endl;
+        std::cout << "  - Nodes: " << graph.numNodes << std::endl;
+        std::cout << "  - Edges: " << graph.edges.size() << std::endl;
+
+        std::vector<GraphEdge> mst = calculateMinimumSpanningTree(graph);
+        std::cout << "Stage 2 Part 2: Minimum Spanning Tree (MST) calculated." << std::endl;
+        std::cout << "  - MST contains " << mst.size() << " edges." << std::endl;
+
+        orientTangentPlanes(unorientedPlanes, mst);
+        std::vector<TangentPlane>& orientedPlanes = unorientedPlanes;
+        std::cout << "Stage 2 Part 3: Orientation propagation complete." << std::endl;
+        testPointIndex = 0;
+        for (int i = 1; i < pointCloud.size(); ++i) {
+            if (pointCloud[i].x > pointCloud[testPointIndex].x) {
+                testPointIndex = i;
+            }
+        }
+        std::cout << "\n--- Verifying Orientation ---" << std::endl;
+        std::cout << "Test point on +X surface (index " << testPointIndex << ")." << std::endl;
+        std::cout << "Normal AFTER orientation: ("
+            << orientedPlanes[testPointIndex].normal.x << ", "
+            << orientedPlanes[testPointIndex].normal.y << ", "
+            << orientedPlanes[testPointIndex].normal.z << ")" << std::endl;
     }
 }

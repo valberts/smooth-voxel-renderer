@@ -139,6 +139,176 @@ std::vector<TangentPlane> calculateTangentPlanes(
 	return allPlanes;
 }
 
+
+RiemannianGraph buildRiemannianGraph(
+	const std::vector<TangentPlane>& planes,
+	int k
+) {
+	std::vector<glm::vec3> centers;
+	for (const auto& plane : planes) {
+		centers.push_back(plane.center);
+	}
+
+	RiemannianGraph rg;
+	rg.numNodes = planes.size();
+
+	std::set<std::pair<int, int>> existingEdges;
+
+	for (int i = 0; i < centers.size(); i++) {
+		if (i % 1000 == 0) {
+			std::cout << "Building graph: processing node " << i << " / " << centers.size() << std::endl;
+		}
+
+		std::vector<int> neighbors = findKNearestNeighbors(centers, i, k);
+
+		for (int j : neighbors) {
+			if (i == j) {
+				continue;
+			}
+
+			int u = std::min(i, j);
+			int v = std::max(i, j);
+
+			if (existingEdges.count({ u, v }) == 0) {
+				float weight = 1.0f - glm::abs(glm::dot(planes[i].normal, planes[j].normal));
+
+				rg.edges.push_back(GraphEdge { u, v, weight });
+				existingEdges.insert({ u, v });
+			}
+		}
+	}
+
+	std::cout << "Finished building graph with " << rg.edges.size() << " edges." << std::endl;
+	return rg;
+}
+
+bool pathExists(int startNode, int endNode, int numNodes, const std::vector<GraphEdge>& edges) {
+	if (startNode == endNode) return true;
+
+	std::vector<std::vector<int>> adj(numNodes);
+	for (const auto& edge : edges) {
+		adj[edge.u].push_back(edge.v);
+		adj[edge.v].push_back(edge.u);
+	}
+
+	std::queue<int> q;
+	q.push(startNode);
+	std::vector<bool> visited(numNodes, false);
+	visited[startNode] = true;
+
+	while (!q.empty()) {
+		int u = q.front();
+		q.pop();
+
+		if (u == endNode) return true;
+
+		for (int v : adj[u]) {
+			if (!visited[v]) {
+				visited[v] = true;
+				q.push(v);
+			}
+		}
+	}
+
+	return false;
+}
+
+std::vector<GraphEdge> calculateMinimumSpanningTree(const RiemannianGraph& graph) {
+	std::cout << "Calculating MST..." << std::endl;
+	std::vector<GraphEdge> sortedEdges = graph.edges;
+	std::sort(sortedEdges.begin(), sortedEdges.end());
+
+	std::vector<GraphEdge> mst;
+	int edgesChecked = 0;
+
+	for (const auto& edge : sortedEdges) {
+		if (++edgesChecked % 1000 == 0) {
+			std::cout << "  - MST progress: checking edge " << edgesChecked << " / " << sortedEdges.size()
+				<< "  (MST size: " << mst.size() << " / " << graph.numNodes - 1 << ")" << std::endl;
+		}
+
+		if (!pathExists(edge.u, edge.v, graph.numNodes, mst)) {
+			mst.push_back(edge);
+		}
+
+		if (mst.size() == graph.numNodes - 1) {
+			break;
+		}
+	}
+
+	std::cout << "  - MST progress: checked edge " << edgesChecked << " / " << sortedEdges.size() 
+              << "  (MST size: " << mst.size() << " / " << graph.numNodes - 1 << ")" << std::endl;
+
+	std::cout << "MST calculation complete." << std::endl;
+	return mst;
+}
+
+void dfs_orient(
+	int currentNode,
+	int parentNode,
+	std::vector<TangentPlane>& planes,
+	const std::vector<std::vector<int>>& adj,
+	std::vector<bool>& visited
+) {
+	visited[currentNode] = true;
+
+	if (parentNode != -1) {
+		const glm::vec3& parentNormal = planes[parentNode].normal;
+
+		glm::vec3& currentNormal = planes[currentNode].normal;
+
+		if (glm::dot(parentNormal, currentNormal) < 0) {
+			currentNormal *= -1.0f;
+		}
+	}
+
+	for (int neighbor : adj[currentNode]) {
+		if (!visited[neighbor]) {
+			dfs_orient(neighbor, currentNode, planes, adj, visited);
+		}
+	}
+}
+
+void orientTangentPlanes(
+	std::vector<TangentPlane>& planes,
+	const std::vector<GraphEdge>& mst
+) {
+	if (planes.empty()) {
+		std::cout << "Error: No tangent planes given." << std::endl;
+		return;
+	}
+
+	int rootNode = -1;
+	float maxZ = -std::numeric_limits<float>::min();
+
+	for (int i = 0; i < planes.size(); ++i) {
+		if (planes[i].center.z > maxZ) {
+			maxZ = planes[i].center.z;
+			rootNode = i;
+		}
+	}
+
+	if (rootNode == -1) {
+		std::cout << "Error: Could not find a root node for orientation." << std::endl;
+		return;
+	}
+
+	// plane with highest Z, point toward +Z
+	if (planes[rootNode].normal.z < 0) {
+		planes[rootNode].normal *= -1.0f;
+	}
+
+	std::vector<std::vector<int>> adj(planes.size());
+	for (const auto& edge : mst) {
+		adj[edge.u].push_back(edge.v);
+		adj[edge.v].push_back(edge.u);
+	}
+	std::vector<bool> visited(planes.size(), false);
+	dfs_orient(rootNode, -1, planes, adj, visited);
+
+	std::cout << "Orientation propagation complete." << std::endl;
+}
+
 // --- Eigensolver for 3x3 symmetric matrices ---
 // A self-contained function to find the eigenvalues and eigenvectors of a 3x3 symmetric matrix.
 // Inputs:

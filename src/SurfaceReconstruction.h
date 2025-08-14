@@ -8,10 +8,29 @@
 #include <glm/mat3x3.hpp>
 #include <glm/gtc/matrix_access.hpp>
 #include <iostream>
+#include <set>
+#include <queue>
 
 struct TangentPlane {
     glm::vec3 center;
     glm::vec3 normal;
+};
+
+// connects node u and v with given weight
+struct GraphEdge {
+    int u;
+    int v;
+    float weight;
+
+    // sorting
+    bool operator<(const GraphEdge& other) const {
+        return weight < other.weight;
+    }
+};
+
+struct RiemannianGraph {
+    std::vector<GraphEdge> edges;
+    int numNodes;
 };
 
 /**
@@ -72,6 +91,32 @@ TangentPlane calculateTangentPlaneForPoint(
 std::vector<TangentPlane> calculateTangentPlanes(
     const std::vector<glm::vec3>& pointCloud,
     int k
+);
+
+/**
+ * @param planes A vector containing all the pre-calculated tangent planes.
+ * @param k The neighborhood size to determine connectivity.
+ * @return A RiemannianGraph structure.
+ */
+RiemannianGraph buildRiemannianGraph(
+    const std::vector<TangentPlane>& planes,
+    int k
+);
+
+/**
+ * @param graph The RiemannianGraph containing all nodes and potential edges.
+ * @return A vector of GraphEdges that form the MST.
+ */
+std::vector<GraphEdge> calculateMinimumSpanningTree(const RiemannianGraph& graph);
+
+/**
+ * Modifies the 'normal' vectors of the planes in-place.
+ * @param planes A vector of all tangent planes. This will be modified.
+ * @param mst The pre-calculated Minimum Spanning Tree connecting the planes.
+ */
+void orientTangentPlanes(
+    std::vector<TangentPlane>& planes,
+    const std::vector<GraphEdge>& mst
 );
 
 void findEigenvectors(const glm::mat3& A, glm::mat3& eigenvectors, glm::vec3& eigenvalues);
