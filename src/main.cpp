@@ -3,8 +3,11 @@
 // --- globals ---
 unsigned int VAO, VBO;
 const int GRID_SIZE = 64;
-std::vector<unsigned char> voxelGrid(GRID_SIZE* GRID_SIZE* GRID_SIZE, 0);
+std::vector<unsigned char> voxelGrid(GRID_SIZE *GRID_SIZE *GRID_SIZE, 0);
 unsigned int voxelTexture;
+unsigned int sdfCentersTexture;
+unsigned int sdfNormalsTexture;
+bool usePlaneFitting = 1;
 
 // --- camera ---
 Camera camera(glm::vec3(GRID_SIZE * 1.5f, GRID_SIZE * 1.5f, GRID_SIZE * 1.5f));
@@ -14,20 +17,23 @@ float deltaTime = 0.0f;
 float lastFrame = 0.0f;
 
 // --- functions ---
-unsigned int make_shader(const std::string& vertex_filepath, const std::string& fragment_filepath);
-unsigned int make_module(const std::string& filepath, unsigned int module_type);
+unsigned int make_shader(const std::string &vertex_filepath, const std::string &fragment_filepath);
+unsigned int make_module(const std::string &filepath, unsigned int module_type);
 void setupQuad();
 void setupVoxelGrid();
 void setupVoxelTexture();
-void processInput(GLFWwindow* window);
-void precomputeSDF();
+void processInput(GLFWwindow *window);
+void precomputeSdf();
+void setupSdfTextures(const std::vector<float> &centerData, const std::vector<float> &normalData);
+void drawGui(float deltaTime);
 
 int main()
 {
     // --- setup ---
-    GLFWwindow* window;
+    GLFWwindow *window;
 
-    if (!glfwInit()) {
+    if (!glfwInit())
+    {
         std::cout << "GLFW couldn't start" << std::endl;
         return -1;
     }
@@ -35,22 +41,34 @@ int main()
     window = glfwCreateWindow(640, 480, "", NULL, NULL); // empty window name
     glfwMakeContextCurrent(window);
 
-    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
+    {
         glfwTerminate();
         return -1;
     }
 
     glClearColor(0.25f, 0.5f, 0.75f, 1.0f);
 
+    // --- imgui ---
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO &io = ImGui::GetIO();
+    (void)io;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    ImGui::StyleColorsDark();
+    ImGui_ImplGlfw_InitForOpenGL(window, true);
+    ImGui_ImplOpenGL3_Init("#version 330");
+
     unsigned int shader = make_shader("src/shaders/shader.vert", "src/shaders/shader.frag");
 
     setupVoxelGrid();
-    precomputeSDF();
+    precomputeSdf();
     setupVoxelTexture();
     setupQuad();
 
     // --- rendering ---
-    while (!glfwWindowShouldClose(window)) {
+    while (!glfwWindowShouldClose(window))
+    {
         float currentFrame = (float)glfwGetTime();
         deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
@@ -67,7 +85,7 @@ int main()
 
         // camera logic
         glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)width / (float)height, 0.1f, 1000.0f);
-        glm::mat4 view = camera.GetViewMatrix(); // Get the view matrix directly from the camera object
+        glm::mat4 view = camera.GetViewMatrix(); // get view matrix directly from camera
 
         glm::mat4 invProjection = glm::inverse(projection);
         glm::mat4 invView = glm::inverse(view);
@@ -76,19 +94,33 @@ int main()
         glUniformMatrix4fv(glGetUniformLocation(shader, "invProjection"), 1, GL_FALSE, glm::value_ptr(invProjection));
         glUniformMatrix4fv(glGetUniformLocation(shader, "invView"), 1, GL_FALSE, glm::value_ptr(invView));
         glUniform3fv(glGetUniformLocation(shader, "cameraPos"), 1, glm::value_ptr(camera.Position));
-        glUniform1i(glGetUniformLocation(shader, "usePlaneFitting"), 1); // 1 on, 0 off
-        glUniform1i(glGetUniformLocation(shader, "neighborhoodSize"), 5); // for a 5x5x5 cube
+        glUniform1i(glGetUniformLocation(shader, "usePlaneFitting"), usePlaneFitting); // 1 on, 0 off
 
         // bind voxel data texture and draw
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_3D, voxelTexture);
         glUniform1i(glGetUniformLocation(shader, "voxelData"), 0);
+
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_3D, sdfCentersTexture);
+        glUniform1i(glGetUniformLocation(shader, "sdfCenters"), 1);
+
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_3D, sdfNormalsTexture);
+        glUniform1i(glGetUniformLocation(shader, "sdfNormals"), 2);
+
         glBindVertexArray(VAO);
         glDrawArrays(GL_TRIANGLES, 0, 6);
+
+        drawGui(deltaTime);
+
         glfwSwapBuffers(window);
     }
 
     // --- cleanup ---
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
     glDeleteVertexArrays(1, &VAO);
     glDeleteBuffers(1, &VBO);
     glDeleteProgram(shader);
@@ -96,12 +128,12 @@ int main()
     return 0;
 }
 
-void processInput(GLFWwindow* window)
+void processInput(GLFWwindow *window)
 {
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
         glfwSetWindowShouldClose(window, true);
 
-   glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ? camera.MovementSpeed = SPEED * 2.0f : camera.MovementSpeed = SPEED;
+    glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ? camera.MovementSpeed = SPEED * 2.0f : camera.MovementSpeed = SPEED;
 
     // Movement
     if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
@@ -129,43 +161,73 @@ void processInput(GLFWwindow* window)
         camera.ProcessMouseMovement(0, -rotationSpeed);
 }
 
-unsigned int make_shader(const std::string& vertex_filepath, const std::string& fragment_filepath) {
+void drawGui(float deltaTime)
+{
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+
+    {
+        ImGui::Begin("Debug");
+
+        ImGui::Text("FPS: %.1f", 1.0f / deltaTime);
+        ImGui::Text("Frame Time: %.3f ms", deltaTime * 1000.0f);
+
+        ImGui::Text("Camera Position: (%.1f, %.1f, %.1f)",
+                    camera.Position.x, camera.Position.y, camera.Position.z);
+        ImGui::Separator();
+        ImGui::Checkbox("Use Plane Fitting", &usePlaneFitting);
+        ImGui::End();
+    }
+
+    ImGui::Render();
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+}
+
+unsigned int make_shader(const std::string &vertex_filepath, const std::string &fragment_filepath)
+{
     std::vector<unsigned int> modules;
     modules.push_back(make_module(vertex_filepath, GL_VERTEX_SHADER));
     modules.push_back(make_module(fragment_filepath, GL_FRAGMENT_SHADER));
 
     unsigned int shader = glCreateProgram();
-    for (unsigned int shaderModule : modules) {
+    for (unsigned int shaderModule : modules)
+    {
         glAttachShader(shader, shaderModule);
     }
     glLinkProgram(shader);
 
     int success;
     glGetProgramiv(shader, GL_LINK_STATUS, &success);
-    if (!success) {
+    if (!success)
+    {
         char errorLog[1024];
         glGetProgramInfoLog(shader, 1024, NULL, errorLog);
-        std::cout << "Shader Linking error:\n" << errorLog << std::endl;
+        std::cout << "Shader Linking error:\n"
+                  << errorLog << std::endl;
     }
 
-    for (unsigned int shaderModule : modules) {
+    for (unsigned int shaderModule : modules)
+    {
         glDeleteShader(shaderModule);
     }
 
     return shader;
 }
 
-unsigned int make_module(const std::string& filepath, unsigned int module_type) {
+unsigned int make_module(const std::string &filepath, unsigned int module_type)
+{
     std::ifstream file;
     std::stringstream bufferedLines;
     std::string line;
     // ../../../src/shaders/shader.frag
     file.open("../../../" + filepath);
-    while (std::getline(file, line)) {
+    while (std::getline(file, line))
+    {
         bufferedLines << line << "\n";
     }
     std::string shaderSource = bufferedLines.str();
-    const char* shaderSrc = shaderSource.c_str();
+    const char *shaderSrc = shaderSource.c_str();
     bufferedLines.str("");
     file.close();
 
@@ -175,40 +237,41 @@ unsigned int make_module(const std::string& filepath, unsigned int module_type) 
 
     int success;
     glGetShaderiv(shaderModule, GL_COMPILE_STATUS, &success);
-    if (!success) {
+    if (!success)
+    {
         char errorLog[1024];
         glGetShaderInfoLog(shaderModule, 1024, NULL, errorLog);
-        std::cout << "Shader Module compilation error:\n" << errorLog << std::endl;
+        std::cout << "Shader Module compilation error:\n"
+                  << errorLog << std::endl;
     }
 
     return shaderModule;
 }
 
-void setupQuad() {
+void setupQuad()
+{
     // two tri that cover entire screen in ndc
     float vertices[] = {
         // positions
-        -1.0f,  1.0f,
+        -1.0f, 1.0f,
         -1.0f, -1.0f,
-         1.0f, -1.0f,
+        1.0f, -1.0f,
 
-        -1.0f,  1.0f,
-         1.0f, -1.0f,
-         1.0f,  1.0f
-    };
+        -1.0f, 1.0f,
+        1.0f, -1.0f,
+        1.0f, 1.0f};
 
     // create vao and vbo
     glGenVertexArrays(1, &VAO);
     glGenBuffers(1, &VBO);
 
-    // Bind the VAO first, then bind and set VBO data
     glBindVertexArray(VAO);
     glBindBuffer(GL_ARRAY_BUFFER, VBO);
     glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
 
     // Set up the vertex attribute pointer
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0); // Enable layout (location = 0)
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void *)0);
+    glEnableVertexAttribArray(0);
 
     // Unbind the VBO and VAO
     glBindBuffer(GL_ARRAY_BUFFER, 0);
@@ -216,24 +279,33 @@ void setupQuad() {
 }
 
 // create sphere in voxel grid
-void setupVoxelGrid() {
+void setupVoxelGrid()
+{
     glm::vec3 center(GRID_SIZE / 2.0f);
-    float radius = GRID_SIZE / 8.0f; // 4.0f for a bigger sphere
+    float radius = GRID_SIZE / 12.0f;
+    float thickness = 1.5f; // thickness of hollow shell
 
-    for (int z = 0; z < GRID_SIZE; ++z) {
-        for (int y = 0; y < GRID_SIZE; ++y) {
-            for (int x = 0; x < GRID_SIZE; ++x) {
+    for (int z = 0; z < GRID_SIZE; ++z)
+    {
+        for (int y = 0; y < GRID_SIZE; ++y)
+        {
+            for (int x = 0; x < GRID_SIZE; ++x)
+            {
                 float dist = glm::distance(glm::vec3(x, y, z), center);
-                if (dist < radius) {
-                    // 3d to id array index
-                    voxelGrid[x + y * GRID_SIZE + z * GRID_SIZE * GRID_SIZE] = 255; // Use 255 for 'true'
+
+                // for solid: if (dist < radius)
+                // for hollow: check if the distance is close to the radius
+                if (abs(dist - radius) < thickness)
+                {
+                    voxelGrid[x + y * GRID_SIZE + z * GRID_SIZE * GRID_SIZE] = 255;
                 }
             }
         }
     }
 }
 
-void setupVoxelTexture() {
+void setupVoxelTexture()
+{
     glGenTextures(1, &voxelTexture);
     glBindTexture(GL_TEXTURE_3D, voxelTexture);
 
@@ -246,41 +318,46 @@ void setupVoxelTexture() {
 
     // Upload the voxel data. We use GL_RED because we only have one channel (on/off).
     glTexImage3D(GL_TEXTURE_3D, 0, GL_RED, GRID_SIZE, GRID_SIZE, GRID_SIZE, 0,
-        GL_RED, GL_UNSIGNED_BYTE, voxelGrid.data());
+                 GL_RED, GL_UNSIGNED_BYTE, voxelGrid.data());
 }
 
-void precomputeSDF() {
+void precomputeSdf()
+{
     std::cout << "Starting surface reconstruction pre-computation..." << std::endl;
     std::vector<glm::vec3> pointCloud = createPointCloudFromVoxelGrid(voxelGrid, GRID_SIZE);
     std::cout << "Step 1: Point cloud created with " << pointCloud.size() << " points." << std::endl;
 
-    if (!pointCloud.empty()) {
+    if (!pointCloud.empty())
+    {
         int testPointIndex = 0; // Start by assuming the first point is the one
-        // Loop through the entire point cloud to find the point with the largest X-coordinate
-        for (int i = 1; i < pointCloud.size(); ++i) {
-            if (pointCloud[i].x > pointCloud[testPointIndex].x) {
+        // find point with largest x coordinate
+        for (int i = 1; i < pointCloud.size(); ++i)
+        {
+            if (pointCloud[i].x > pointCloud[testPointIndex].x)
+            {
                 testPointIndex = i;
             }
         }
         std::cout << "Found a test point on the far +X surface." << std::endl;
-        int k = 15;
+        int k = 64;
         std::vector<int> neighbors = findKNearestNeighbors(pointCloud, testPointIndex, k);
 
         std::cout << "Step 2: Found " << k << " nearest neighbors for point "
-            << testPointIndex << " ("
-            << pointCloud[testPointIndex].x << ", "
-            << pointCloud[testPointIndex].y << ", "
-            << pointCloud[testPointIndex].z << "):" << std::endl;
+                  << testPointIndex << " ("
+                  << pointCloud[testPointIndex].x << ", "
+                  << pointCloud[testPointIndex].y << ", "
+                  << pointCloud[testPointIndex].z << "):" << std::endl;
 
-        for (int neighborIndex : neighbors) {
-            const auto& point = pointCloud[neighborIndex];
+        for (int neighborIndex : neighbors)
+        {
+            const auto &point = pointCloud[neighborIndex];
             std::cout << "  - Point " << neighborIndex << " at ("
-                << point.x << ", " << point.y << ", " << point.z << ")" << std::endl;
+                      << point.x << ", " << point.y << ", " << point.z << ")" << std::endl;
         }
 
         glm::vec3 centroid = calculateCentroid(pointCloud, neighbors);
         std::cout << "  - Calculated Centroid: ("
-            << centroid.x << ", " << centroid.y << ", " << centroid.z << ")" << std::endl;
+                  << centroid.x << ", " << centroid.y << ", " << centroid.z << ")" << std::endl;
 
         glm::mat3 covariance = calculateCovarianceMatrix(pointCloud, neighbors, centroid);
         std::cout << "Step 3: Calculated Covariance Matrix:" << std::endl;
@@ -298,10 +375,11 @@ void precomputeSDF() {
         std::cout << "  - Eigenvalue 2: " << eigenvalues[2] << ", Eigenvector: (" << eigenvectors[2].x << ", " << eigenvectors[2].y << ", " << eigenvectors[2].z << ")" << std::endl;
 
         int smallestIdx = 0;
-        if (eigenvalues[1] < eigenvalues[smallestIdx]) smallestIdx = 1;
-        if (eigenvalues[2] < eigenvalues[smallestIdx]) smallestIdx = 2;
+        if (eigenvalues[1] < eigenvalues[smallestIdx])
+            smallestIdx = 1;
+        if (eigenvalues[2] < eigenvalues[smallestIdx])
+            smallestIdx = 2;
         std::cout << "  -> Smallest Eigenvalue is at index " << smallestIdx << ". The normal will be Eigenvector " << smallestIdx << "." << std::endl;
-
 
         std::cout << "\n--- Calculating Tangent Plane for Point " << testPointIndex << " ---" << std::endl;
         TangentPlane plane = calculateTangentPlaneForPoint(pointCloud, testPointIndex, k);
@@ -310,7 +388,7 @@ void precomputeSDF() {
         std::cout << "Result -> Normal:   (" << plane.normal.x << ", " << plane.normal.y << ", " << plane.normal.z << ")" << std::endl;
         std::vector<TangentPlane> unorientedPlanes = calculateTangentPlanes(pointCloud, k);
         std::cout << "Stage 1 Complete: Calculated " << unorientedPlanes.size() << " unoriented tangent planes." << std::endl;
-       
+
         std::cout << "\n--- Starting Stage 2: Consistent Tangent Plane Orientation ---" << std::endl;
         RiemannianGraph graph = buildRiemannianGraph(unorientedPlanes, k);
         std::cout << "Stage 2 Part 1: Riemannian Graph created." << std::endl;
@@ -322,19 +400,60 @@ void precomputeSDF() {
         std::cout << "  - MST contains " << mst.size() << " edges." << std::endl;
 
         orientTangentPlanes(unorientedPlanes, mst);
-        std::vector<TangentPlane>& orientedPlanes = unorientedPlanes;
+        std::vector<TangentPlane> &orientedPlanes = unorientedPlanes;
         std::cout << "Stage 2 Part 3: Orientation propagation complete." << std::endl;
         testPointIndex = 0;
-        for (int i = 1; i < pointCloud.size(); ++i) {
-            if (pointCloud[i].x > pointCloud[testPointIndex].x) {
+        for (int i = 1; i < pointCloud.size(); ++i)
+        {
+            if (pointCloud[i].x > pointCloud[testPointIndex].x)
+            {
                 testPointIndex = i;
             }
         }
         std::cout << "\n--- Verifying Orientation ---" << std::endl;
         std::cout << "Test point on +X surface (index " << testPointIndex << ")." << std::endl;
         std::cout << "Normal AFTER orientation: ("
-            << orientedPlanes[testPointIndex].normal.x << ", "
-            << orientedPlanes[testPointIndex].normal.y << ", "
-            << orientedPlanes[testPointIndex].normal.z << ")" << std::endl;
+                  << orientedPlanes[testPointIndex].normal.x << ", "
+                  << orientedPlanes[testPointIndex].normal.y << ", "
+                  << orientedPlanes[testPointIndex].normal.z << ")" << std::endl;
+
+        std::cout << "\n--- Starting Stage 3: SDF Data Generation ---" << std::endl;
+        std::vector<float> centerData, normalData;
+        createSdf(orientedPlanes, pointCloud, GRID_SIZE, centerData, normalData);
+
+        setupSdfTextures(centerData, normalData);
+
+        std::cout << "\n--- All CPU pre-computation is complete! ---" << std::endl;
     }
+}
+
+void setupSdfTextures(const std::vector<float> &centerData, const std::vector<float> &normalData)
+{
+    glGenTextures(1, &sdfCentersTexture);
+    glBindTexture(GL_TEXTURE_3D, sdfCentersTexture);
+
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_RGB32F, GRID_SIZE, GRID_SIZE, GRID_SIZE, 0,
+                 GL_RGB, GL_FLOAT, centerData.data());
+
+    std::cout << "SDF centers texture created and uploaded." << std::endl;
+
+    glGenTextures(1, &sdfNormalsTexture);
+    glBindTexture(GL_TEXTURE_3D, sdfNormalsTexture);
+
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_RGB32F, GRID_SIZE, GRID_SIZE, GRID_SIZE, 0,
+                 GL_RGB, GL_FLOAT, normalData.data());
+
+    std::cout << "SDF normals texture created and uploaded." << std::endl;
 }

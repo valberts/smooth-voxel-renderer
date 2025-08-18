@@ -4,6 +4,7 @@ project(smooth_voxel_renderer VERSION 1.0.0)
 find_package(OpenGL REQUIRED)
 find_package(glfw3 CONFIG REQUIRED)
 find_package(glad CONFIG REQUIRED)
+find_package(imgui CONFIG REQUIRED)
 
 add_executable(smooth_voxel_renderer src/config.h src/main.cpp  "src/Camera.h"  "src/SurfaceReconstruction.h" "src/SurfaceReconstruction.cpp")
 
@@ -12,4 +13,5 @@ target_link_libraries(smooth_voxel_renderer
         glfw
         glad::glad
         OpenGL::GL
+        imgui::imgui
 )

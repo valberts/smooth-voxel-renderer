@@ -3,6 +3,9 @@
 out vec4 FragColor;
 
 uniform sampler3D voxelData;
+uniform sampler3D sdfCenters;
+uniform sampler3D sdfNormals;
+uniform bool usePlaneFitting;
 uniform mat4 invProjection;
 uniform mat4 invView;
 uniform vec3 cameraPos;
@@ -11,14 +14,6 @@ const int MAX_STEPS = 256;
 const float T_MIN = 0.1;
 const int GRID_SIZE = 64;
 
-/**
- * @brief Ray vs AABB intersection test
- * @param ro Ray origin
- * @param rd Ray direction (normalized)
- * @param grid_min The minimum corner of our grid.
- * @param grid_max The maximum corner of our grid.
- * @return Ray entry time, 1e30 if no intersection was found.
- */
 float ray_aabb(const in vec3 ro, const in vec3 rd, const in vec3 grid_min, const in vec3 grid_max) {
     vec3 inv_dir = 1.0 / rd;
     vec3 t1 = (grid_min - ro) * inv_dir;
@@ -30,11 +25,22 @@ float ray_aabb(const in vec3 ro, const in vec3 rd, const in vec3 grid_min, const
     float tmin = max(max(tmin_v.x, tmin_v.y), tmin_v.z);
     float tmax = min(min(tmax_v.x, tmax_v.y), tmax_v.z);
 
-    if (tmax >= tmin) {
-      return tmin;
-    }
+    if (tmax >= tmin) return tmin;
 
     return 1e30; // miss
+}
+
+float map(vec3 p) {
+    ivec3 voxel_coord = ivec3(floor(p));
+    vec3 center = texelFetch(sdfCenters, voxel_coord, 0).rgb;
+    vec3 normal = texelFetch(sdfNormals, voxel_coord, 0).rgb;
+
+    if (length(normal) < 0.1) {
+        vec3 voxel_center = vec3(voxel_coord) + 0.5;
+        return max(0.5, distance(p, voxel_center));
+    }
+
+    return dot(p - center, normal);
 }
 
 void main()
@@ -62,21 +68,39 @@ void main()
         return;
     }
 
-    // We start marching from the grid entry point or the near plane, whichever is further.
+    // --- plane fitting ---
+    if (usePlaneFitting) {
+        const float EPSILON = 1e-4;
+        const float HIT_THRESHOLD = 0.01;
+        const int MAX_MARCH_STEPS = 1024;
+        float t = max(entry_t, T_MIN);
+
+        for (int i = 0; i < MAX_MARCH_STEPS; i++) {
+            vec3 p = ro + t * rd;
+            float dist = map(p);
+            if (dist < HIT_THRESHOLD) {
+                
+                vec3 uvw = p / float(GRID_SIZE);
+                vec3 sdf_normal = texture(sdfNormals, uvw).rgb;
+
+                // Visualize the normal vector by mapping it to a color
+                vec3 normal_color = sdf_normal * 0.5 + 0.5;
+                FragColor = vec4(normal_color, 1.0);
+                return; 
+            }    
+            t += dist;
+        }
+        FragColor = vec4(0.1, 0.1, 0.2, 1.0); // Background color
+        return;
+    } // end if usePlaneFitting
+    
+
     float t = max(entry_t, T_MIN);
-    // This is our floating-point position where we enter the grid.
     vec3 entry_pos = ro + t * rd;
-    // And this is the integer voxel coordinate we start in.
     ivec3 pos = ivec3(floor(entry_pos));
-
-    // This variable was missing, it's needed for delta and tmax calculation.
     vec3 inv_dir = 1.0 / rd;
-
-    // 'delta' is the time it takes for the ray to cross one voxel on each axis.
     vec3 delta = abs(vec3(GRID_SIZE) * inv_dir) / GRID_SIZE;
-    // 'step' tells us which direction to step on each axis (1 or -1).
     ivec3 step = ivec3(sign(rd));
-    // 'tmax' holds the time at which the ray crosses the next cell boundary on each axis.
     vec3 tmax = ( (vec3(pos) + max(vec3(0.0), vec3(step)) ) - entry_pos) * inv_dir;
 
 
@@ -84,11 +108,10 @@ void main()
     vec3 hit_normal = vec3(0.0);
     for(int i = 0; i < MAX_STEPS; ++i) {
 
-        // Let's see if the voxel at our current position is solid.
-        // We sample the texture at the center of the voxel.
+        // check if voxel at current position is solid
+        // sample texture at center of voxel
         vec3 sample_pos = (vec3(pos) + 0.5) / GRID_SIZE;
-        if (texture(voxelData, sample_pos).r > 0.0) {
-            // We hit something! Let's use the normal for some basic shading.
+        if (texture(voxelData, sample_pos).r > 0.0) { // hit
             FragColor = vec4(abs(hit_normal) * 0.7 + 0.3, 1.0);
             return;
         }
@@ -112,7 +135,7 @@ void main()
             }
         }
 
-        // Now we update the tmax value for the axis we just stepped on.
+        // update the tmax value for the axis we just stepped on.
         if (tmax.x < tmax.y) {
             if (tmax.x < tmax.z) {
                 tmax.x += delta.x;
@@ -128,7 +151,7 @@ void main()
         }
 
 
-        // Check if we've stepped outside the grid.
+        // check if outside grid
         if (pos.x < 0 || pos.x >= GRID_SIZE ||
             pos.y < 0 || pos.y >= GRID_SIZE ||
             pos.z < 0 || pos.z >= GRID_SIZE) {
@@ -136,6 +159,6 @@ void main()
         }
     }
 
-    // If the loop finishes, it means we didn't hit anything.
+    // no hit
     FragColor = vec4(0.1, 0.1, 0.2, 1.0); // Background color
 }

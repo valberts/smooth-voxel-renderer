@@ -13,7 +13,7 @@ std::vector<glm::vec3> createPointCloudFromVoxelGrid(
 			for (int x = 0; x < gridSize; x++) {
 				int index = x + y * gridSize + z * gridSize * gridSize;
 				if (voxelGrid[index] > 0) {
-					pointCloud.push_back(glm::vec3(x, y, z));
+					pointCloud.push_back(glm::vec3(x, y, z) + 0.5f); // fixed +0.5f
 				}
 			}
 		}
@@ -86,21 +86,16 @@ TangentPlane calculateTangentPlaneForPoint(
 	int queryPointIndex,
 	int k
 ) {
-	// 1. Get neighbors
 	std::vector<int> neighbors = findKNearestNeighbors(pointCloud, queryPointIndex, k);
 
-	// 2. Get centroid
 	glm::vec3 centroid = calculateCentroid(pointCloud, neighbors);
 
-	// 3. Get covariance
 	glm::mat3 covariance = calculateCovarianceMatrix(pointCloud, neighbors, centroid);
 
-	// 4. Solve eigensystem
 	glm::mat3 eigenvectors;
 	glm::vec3 eigenvalues;
 	findEigenvectors(covariance, eigenvectors, eigenvalues);
 
-	// 5. Find the index of the smallest eigenvalue.
 	int smallestEigenvalueIndex = 0;
 	if (eigenvalues[1] < eigenvalues[smallestEigenvalueIndex]) {
 		smallestEigenvalueIndex = 1;
@@ -109,10 +104,8 @@ TangentPlane calculateTangentPlaneForPoint(
 		smallestEigenvalueIndex = 2;
 	}
 
-	// 6. The normal is the eigenvector (column) at that index.
 	glm::vec3 normal = eigenvectors[smallestEigenvalueIndex];
 
-	// 7. Create and return the TangentPlane struct.
 	TangentPlane plane;
 	plane.center = centroid;
 	plane.normal = normal;
@@ -155,6 +148,7 @@ RiemannianGraph buildRiemannianGraph(
 	std::set<std::pair<int, int>> existingEdges;
 
 	for (int i = 0; i < centers.size(); i++) {
+		// debug
 		if (i % 1000 == 0) {
 			std::cout << "Building graph: processing node " << i << " / " << centers.size() << std::endl;
 		}
@@ -178,6 +172,7 @@ RiemannianGraph buildRiemannianGraph(
 		}
 	}
 
+	// debug
 	std::cout << "Finished building graph with " << rg.edges.size() << " edges." << std::endl;
 	return rg;
 }
@@ -214,7 +209,7 @@ bool pathExists(int startNode, int endNode, int numNodes, const std::vector<Grap
 }
 
 std::vector<GraphEdge> calculateMinimumSpanningTree(const RiemannianGraph& graph) {
-	std::cout << "Calculating MST..." << std::endl;
+	std::cout << "Calculating MST..." << std::endl; // debug
 	std::vector<GraphEdge> sortedEdges = graph.edges;
 	std::sort(sortedEdges.begin(), sortedEdges.end());
 
@@ -222,6 +217,7 @@ std::vector<GraphEdge> calculateMinimumSpanningTree(const RiemannianGraph& graph
 	int edgesChecked = 0;
 
 	for (const auto& edge : sortedEdges) {
+		// debug
 		if (++edgesChecked % 1000 == 0) {
 			std::cout << "  - MST progress: checking edge " << edgesChecked << " / " << sortedEdges.size()
 				<< "  (MST size: " << mst.size() << " / " << graph.numNodes - 1 << ")" << std::endl;
@@ -236,6 +232,7 @@ std::vector<GraphEdge> calculateMinimumSpanningTree(const RiemannianGraph& graph
 		}
 	}
 
+	// debug
 	std::cout << "  - MST progress: checked edge " << edgesChecked << " / " << sortedEdges.size() 
               << "  (MST size: " << mst.size() << " / " << graph.numNodes - 1 << ")" << std::endl;
 
@@ -274,7 +271,7 @@ void orientTangentPlanes(
 	const std::vector<GraphEdge>& mst
 ) {
 	if (planes.empty()) {
-		std::cout << "Error: No tangent planes given." << std::endl;
+		std::cout << "Error: No tangent planes given." << std::endl; // debug
 		return;
 	}
 
@@ -289,7 +286,7 @@ void orientTangentPlanes(
 	}
 
 	if (rootNode == -1) {
-		std::cout << "Error: Could not find a root node for orientation." << std::endl;
+		std::cout << "Error: Could not find a root node for orientation." << std::endl; // debug
 		return;
 	}
 
@@ -306,7 +303,40 @@ void orientTangentPlanes(
 	std::vector<bool> visited(planes.size(), false);
 	dfs_orient(rootNode, -1, planes, adj, visited);
 
-	std::cout << "Orientation propagation complete." << std::endl;
+	std::cout << "Orientation propagation complete." << std::endl; // debug
+}
+
+void createSdf(
+	const std::vector<TangentPlane>& planes,
+	const std::vector<glm::vec3>& pointCloud,
+	int gridSize,
+	std::vector<float>& centerData,
+	std::vector<float>& normalData
+) {
+	int totalVoxels = gridSize * gridSize * gridSize;
+	centerData.resize(totalVoxels * 3, 0.0f); 
+	normalData.resize(totalVoxels * 3, 0.0f); 
+
+	for (int i = 0; i < planes.size(); ++i) {
+		const glm::vec3& p = pointCloud[i];
+		int x = static_cast<int>(p.x);
+		int y = static_cast<int>(p.y);
+		int z = static_cast<int>(p.z);
+
+		int baseIndex = (x + y * gridSize + z * gridSize * gridSize) * 3;
+
+		const TangentPlane& plane = planes[i];
+
+		centerData[baseIndex + 0] = plane.center.x;
+		centerData[baseIndex + 1] = plane.center.y;
+		centerData[baseIndex + 2] = plane.center.z;
+
+		normalData[baseIndex + 0] = plane.normal.x;
+		normalData[baseIndex + 1] = plane.normal.y;
+		normalData[baseIndex + 2] = plane.normal.z;
+	}
+
+	std::cout << "SDF data arrays created." << std::endl; // debug
 }
 
 // --- Eigensolver for 3x3 symmetric matrices ---

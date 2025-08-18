@@ -119,4 +119,19 @@ void orientTangentPlanes(
     const std::vector<GraphEdge>& mst
 );
 
+/**
+ * @param planes The final, oriented tangent planes.
+ * @param pointCloud The original point cloud, used to get the voxel coordinates.
+ * @param gridSize The dimension of the grid.
+ * @param[out] centerData The flat vector to be filled with center data.
+ * @param[out] normalData The flat vector to be filled with normal data.
+ */
+void createSdf(
+    const std::vector<TangentPlane>& planes,
+    const std::vector<glm::vec3>& pointCloud,
+    int gridSize,
+    std::vector<float>& centerData,
+    std::vector<float>& normalData
+);
+
 void findEigenvectors(const glm::mat3& A, glm::mat3& eigenvectors, glm::vec3& eigenvalues);
