@@ -79,11 +79,8 @@ void main()
             vec3 p = ro + t * rd;
             float dist = map(p);
             if (dist < HIT_THRESHOLD) {
-                
                 vec3 uvw = p / float(GRID_SIZE);
                 vec3 sdf_normal = texture(sdfNormals, uvw).rgb;
-
-                // Visualize the normal vector by mapping it to a color
                 vec3 normal_color = sdf_normal * 0.5 + 0.5;
                 FragColor = vec4(normal_color, 1.0);
                 return; 

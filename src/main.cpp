@@ -8,6 +8,7 @@ unsigned int voxelTexture;
 unsigned int sdfCentersTexture;
 unsigned int sdfNormalsTexture;
 bool usePlaneFitting = 1;
+int k_neighbors = 64;
 
 // --- camera ---
 Camera camera(glm::vec3(GRID_SIZE * 1.5f, GRID_SIZE * 1.5f, GRID_SIZE * 1.5f));
@@ -26,6 +27,15 @@ void processInput(GLFWwindow *window);
 void precomputeSdf();
 void setupSdfTextures(const std::vector<float> &centerData, const std::vector<float> &normalData);
 void drawGui(float deltaTime);
+
+// --- shape ---
+enum ShapeType {
+    SHAPE_SPHERE,
+    SHAPE_STAIRCASE_1_1,
+    SHAPE_STAIRCASE_2_1,
+    SHAPE_CUBE
+};
+ShapeType currentShape = SHAPE_SPHERE; 
 
 int main()
 {
@@ -150,7 +160,7 @@ void processInput(GLFWwindow *window)
         camera.ProcessKeyboard(DOWN, deltaTime);
 
     // Rotation
-    float rotationSpeed = 2.5f; // constant speed for arrow keys
+    float rotationSpeed = 2.5f;
     if (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS)
         camera.ProcessMouseMovement(-rotationSpeed, 0);
     if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS)
@@ -177,6 +187,51 @@ void drawGui(float deltaTime)
                     camera.Position.x, camera.Position.y, camera.Position.z);
         ImGui::Separator();
         ImGui::Checkbox("Use Plane Fitting", &usePlaneFitting);
+
+        ImGui::Separator();
+
+        // --- Shape Selector ---
+        const char* items[] = {
+            "Sphere",
+            "Staircase (1:1)",
+            "Staircase (2:1)",
+            "Cube"
+        };
+        int current_item_index = static_cast<int>(currentShape); 
+
+        if (ImGui::Combo("Shape", &current_item_index, items, IM_ARRAYSIZE(items))) {
+            currentShape = static_cast<ShapeType>(current_item_index); 
+            std::cout << "Shape changed, regenerating voxel grid..." << std::endl;
+            setupVoxelGrid();
+            precomputeSdf();
+        }
+
+        ImGui::Separator();
+
+        // --- k-Neighborhood Selector ---
+        const char* k_items[] = { "1", "2", "4", "8", "16", "32", "64" };
+        const int k_values[] = { 1,   2,   4,   8,   16,   32,   64 };
+
+        int current_k_index = -1;
+        for (int n = 0; n < IM_ARRAYSIZE(k_values); n++) {
+            if (k_values[n] == k_neighbors) {
+                current_k_index = n;
+                break;
+            }
+        }
+
+        if (current_k_index == -1) {
+            current_k_index = 6;
+            k_neighbors = k_values[current_k_index];
+        }
+
+
+        if (ImGui::Combo("k-Neighbors", &current_k_index, k_items, IM_ARRAYSIZE(k_items))) {
+            k_neighbors = k_values[current_k_index];
+
+            std::cout << "k value changed to " << k_neighbors << ", re-computing SDF..." << std::endl;
+            precomputeSdf();
+        }
         ImGui::End();
     }
 
@@ -278,30 +333,84 @@ void setupQuad()
     glBindVertexArray(0);
 }
 
-// create sphere in voxel grid
-void setupVoxelGrid()
-{
+void generateSphere() {
     glm::vec3 center(GRID_SIZE / 2.0f);
     float radius = GRID_SIZE / 12.0f;
-    float thickness = 1.5f; // thickness of hollow shell
+    float thickness = 1.5f;
+    for (int z = 0; z < GRID_SIZE; ++z) for (int y = 0; y < GRID_SIZE; ++y) for (int x = 0; x < GRID_SIZE; ++x) {
+        float dist = glm::distance(glm::vec3(x, y, z), center);
+        if (abs(dist - radius) < thickness) {
+            voxelGrid[x + y * GRID_SIZE + z * GRID_SIZE * GRID_SIZE] = 255;
+        }
+    }
+}
 
-    for (int z = 0; z < GRID_SIZE; ++z)
-    {
-        for (int y = 0; y < GRID_SIZE; ++y)
-        {
-            for (int x = 0; x < GRID_SIZE; ++x)
-            {
-                float dist = glm::distance(glm::vec3(x, y, z), center);
+void generateStaircase(int treadWidth, int riserHeight) {
+    int start_x = GRID_SIZE / 12;
+    int start_y = GRID_SIZE / 12;
+    int num_steps = 10;
+    int depth = 4; 
 
-                // for solid: if (dist < radius)
-                // for hollow: check if the distance is close to the radius
-                if (abs(dist - radius) < thickness)
-                {
+    auto placeVoxelSlab = [&](int x, int y) {
+        for (int z = start_y; z < start_y + depth; ++z) {
+            if (x >= 0 && x < GRID_SIZE && y >= 0 && y < GRID_SIZE && z >= 0 && z < GRID_SIZE) {
+                voxelGrid[x + y * GRID_SIZE + z * GRID_SIZE * GRID_SIZE] = 255;
+            }
+        }
+    };
+
+    for (int i = 0; i < num_steps; ++i) {
+
+        int x_base = start_x + i * treadWidth;
+        int y_base = start_y + i * riserHeight;
+
+        for (int t = 0; t < treadWidth; ++t) {
+            placeVoxelSlab(x_base + t, y_base);
+        }
+
+        for (int r = 0; r < riserHeight; ++r) {
+            placeVoxelSlab(x_base + treadWidth, y_base + r);
+        }
+    }
+}
+
+void generateCube() {
+    int min_coord = GRID_SIZE / 12;
+    int max_coord = GRID_SIZE * 3 / 12;
+
+    for (int x = min_coord; x <= max_coord; ++x) {
+        for (int y = min_coord; y <= max_coord; ++y) {
+            for (int z = min_coord; z <= max_coord; ++z) {
+                if (x == min_coord || x == max_coord ||
+                    y == min_coord || y == max_coord ||
+                    z == min_coord || z == max_coord) {
+
                     voxelGrid[x + y * GRID_SIZE + z * GRID_SIZE * GRID_SIZE] = 255;
                 }
             }
         }
     }
+}
+
+void setupVoxelGrid() {
+    std::fill(voxelGrid.begin(), voxelGrid.end(), 0);
+
+    switch (currentShape) {
+    case SHAPE_SPHERE:
+        generateSphere();
+        break;
+    case SHAPE_STAIRCASE_1_1:
+        generateStaircase(1, 1);
+        break;
+    case SHAPE_STAIRCASE_2_1:
+        generateStaircase(2, 1);
+        break;
+    case SHAPE_CUBE:
+        generateCube();
+        break;
+    }
+
+    setupVoxelTexture();
 }
 
 void setupVoxelTexture()
@@ -339,10 +448,9 @@ void precomputeSdf()
             }
         }
         std::cout << "Found a test point on the far +X surface." << std::endl;
-        int k = 64;
-        std::vector<int> neighbors = findKNearestNeighbors(pointCloud, testPointIndex, k);
+        std::vector<int> neighbors = findKNearestNeighbors(pointCloud, testPointIndex, k_neighbors);
 
-        std::cout << "Step 2: Found " << k << " nearest neighbors for point "
+        std::cout << "Step 2: Found " << k_neighbors << " nearest neighbors for point "
                   << testPointIndex << " ("
                   << pointCloud[testPointIndex].x << ", "
                   << pointCloud[testPointIndex].y << ", "
@@ -382,15 +490,15 @@ void precomputeSdf()
         std::cout << "  -> Smallest Eigenvalue is at index " << smallestIdx << ". The normal will be Eigenvector " << smallestIdx << "." << std::endl;
 
         std::cout << "\n--- Calculating Tangent Plane for Point " << testPointIndex << " ---" << std::endl;
-        TangentPlane plane = calculateTangentPlaneForPoint(pointCloud, testPointIndex, k);
+        TangentPlane plane = calculateTangentPlaneForPoint(pointCloud, testPointIndex, k_neighbors);
 
         std::cout << "Result -> Centroid: (" << plane.center.x << ", " << plane.center.y << ", " << plane.center.z << ")" << std::endl;
         std::cout << "Result -> Normal:   (" << plane.normal.x << ", " << plane.normal.y << ", " << plane.normal.z << ")" << std::endl;
-        std::vector<TangentPlane> unorientedPlanes = calculateTangentPlanes(pointCloud, k);
+        std::vector<TangentPlane> unorientedPlanes = calculateTangentPlanes(pointCloud, k_neighbors);
         std::cout << "Stage 1 Complete: Calculated " << unorientedPlanes.size() << " unoriented tangent planes." << std::endl;
 
         std::cout << "\n--- Starting Stage 2: Consistent Tangent Plane Orientation ---" << std::endl;
-        RiemannianGraph graph = buildRiemannianGraph(unorientedPlanes, k);
+        RiemannianGraph graph = buildRiemannianGraph(unorientedPlanes, k_neighbors);
         std::cout << "Stage 2 Part 1: Riemannian Graph created." << std::endl;
         std::cout << "  - Nodes: " << graph.numNodes << std::endl;
         std::cout << "  - Edges: " << graph.edges.size() << std::endl;
