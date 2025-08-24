@@ -9,6 +9,7 @@ unsigned int sdfCentersTexture;
 unsigned int sdfNormalsTexture;
 bool usePlaneFitting = 1;
 int k_neighbors = 64;
+int neighborhood_ring_size = 1;
 
 // --- camera ---
 Camera camera(glm::vec3(GRID_SIZE * 1.5f, GRID_SIZE * 1.5f, GRID_SIZE * 1.5f));
@@ -72,7 +73,7 @@ int main()
     unsigned int shader = make_shader("src/shaders/shader.vert", "src/shaders/shader.frag");
 
     setupVoxelGrid();
-    precomputeSdf();
+    //precomputeSdf();
     setupVoxelTexture();
     setupQuad();
 
@@ -105,6 +106,7 @@ int main()
         glUniformMatrix4fv(glGetUniformLocation(shader, "invView"), 1, GL_FALSE, glm::value_ptr(invView));
         glUniform3fv(glGetUniformLocation(shader, "cameraPos"), 1, glm::value_ptr(camera.Position));
         glUniform1i(glGetUniformLocation(shader, "usePlaneFitting"), usePlaneFitting); // 1 on, 0 off
+        glUniform1i(glGetUniformLocation(shader, "neighborhoodRingSize"), neighborhood_ring_size);
 
         // bind voxel data texture and draw
         glActiveTexture(GL_TEXTURE0);
@@ -203,7 +205,7 @@ void drawGui(float deltaTime)
             currentShape = static_cast<ShapeType>(current_item_index); 
             std::cout << "Shape changed, regenerating voxel grid..." << std::endl;
             setupVoxelGrid();
-            precomputeSdf();
+            //precomputeSdf();
         }
 
         ImGui::Separator();
@@ -232,6 +234,13 @@ void drawGui(float deltaTime)
             std::cout << "k value changed to " << k_neighbors << ", re-computing SDF..." << std::endl;
             precomputeSdf();
         }
+
+        ImGui::Separator();
+
+        // --- Neighborhood Ring Size Slider ---
+        // Creates a slider from 1 (3x3x3) to 3 (7x7x7).
+        // This doesn't need to re-run the CPU pre-computation, so it's very fast.
+        ImGui::SliderInt("Ring Size", &neighborhood_ring_size, 1, 3);
         ImGui::End();
     }
 
