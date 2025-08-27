@@ -12,8 +12,6 @@ uniform mat4 invView;
 uniform vec3 cameraPos;
 uniform int neighborhoodRingSize; // 1=3x3, 2=5x5, 3=7x7
 
-const int MAX_STEPS = 256;
-const float T_MIN = 0.1;
 const int GRID_SIZE = 64;
 const int MAX_NEIGHBORS = 343;
 
@@ -157,154 +155,85 @@ float map(vec3 p) {
 
 void main()
 {
-    // --- Ray Generation ---
+    // ray generation
     float x = (gl_FragCoord.x / 640.0) * 2.0 - 1.0;
     float y = (gl_FragCoord.y / 480.0) * 2.0 - 1.0;
     vec4 target = invProjection * vec4(x, y, 1.0, 1.0);
     vec3 rd = vec3(invView * vec4(normalize(vec3(target) / target.w), 0.0));
     vec3 ro = cameraPos;
 
-    // --- Bounding Box Intersection ---
+    // bounding box intersection
     vec3 grid_min = vec3(0.0);
     vec3 grid_max = vec3(GRID_SIZE);
-    float entry_t = ray_aabb(ro, rd, grid_min, grid_max);
-    if (entry_t == 1e30) {
-        FragColor = vec4(0.1, 0.1, 0.2, 1.0);
+    float t = ray_aabb(ro, rd, grid_min, grid_max);
+    if (t == 1e30) { // didnt hit bounding box
+        FragColor = vec4(0.1, 0.1, 0.1, 1.0);
         return;
     }
 
-    // --- setup ray traversal ---
-    float t = max(entry_t, T_MIN);
-    vec3 entry_pos = ro + t * rd;
-    ivec3 pos = ivec3(floor(entry_pos));
-    vec3 inv_dir = 1.0 / rd;
-    vec3 delta = abs(vec3(GRID_SIZE) * inv_dir) / GRID_SIZE;
-    ivec3 step = ivec3(sign(rd));
-    vec3 tmax = ( (vec3(pos) + max(vec3(0.0), vec3(step)) ) - entry_pos) * inv_dir;
+    const float STEP_SIZE = 0.05;
+    const int MAX_STEPS = 1024;
+    const float T_MIN = 0.1;
 
-    // --- plane fitting ---
+    t = max(t, T_MIN);
+    
     if (usePlaneFitting) {
-        for(int i = 0; i < MAX_STEPS; ++i) {
-            vec3 sample_pos_uvw = (vec3(pos) + 0.5) / GRID_SIZE;
-            if (texture(voxelData, sample_pos_uvw).r > 0.0) {
+        for (int i = 0; i < MAX_STEPS; ++i) {
+            vec3 p = ro + rd * t;
+            ivec3 pos = ivec3(floor(p));
+
+            if (texelFetch(voxelData, pos, 0).r > 0.0) { // hit a voxel
                 vec3 neighbors[MAX_NEIGHBORS];
                 int neighbor_count = getVoxelNeighborhood(pos, neighborhoodRingSize, neighbors);
 
                 vec3 plane_center = calculateCentroid(neighbors, neighbor_count);
-
                 mat3 covariance = calculateCovarianceMatrix(neighbors, neighbor_count, plane_center);
 
-                
                 vec3 eigenvalues;
                 mat3 eigenvectors;
                 solveEigenSystem(covariance, eigenvalues, eigenvectors);
-
                 int smallest_idx = 0;
                 if (eigenvalues.y < eigenvalues.x) smallest_idx = 1;
                 if (eigenvalues.z < eigenvalues[smallest_idx]) smallest_idx = 2;
-
-                vec3 normal = eigenvectors[smallest_idx];
+                vec3 plane_normal = eigenvectors[smallest_idx];
 
                 // --- consistent orientation---
                 vec3 object_center = vec3(GRID_SIZE / 2.0);
                 vec3 hit_voxel_center = vec3(pos) + 0.5;
                 vec3 out_vector = hit_voxel_center - object_center;
-                if (dot(normal, out_vector) < 0.0) {
-                    normal = -normal;
+                if (dot(plane_normal, out_vector) < 0.0) {
+                    plane_normal = -plane_normal;
                 }
 
-                // vec3 view_vector = ro - (vec3(pos) + 0.5);
-                // if (dot(normal, view_vector) < 0.0) {
-                //     normal = -normal;
-                // }
-
-                float denom = dot(rd, normal);
-
-                if (abs(denom) > 1e-6) {
-                    float t_intersect = dot(plane_center - ro, normal) / denom;
-                    vec3 p = ro + t_intersect * rd;
-                    if (all(equal(ivec3(floor(p)), pos))) {
-                        vec4 clip_space_pos = invView * invProjection * vec4(p, 1.0);
-                        gl_FragDepth = (clip_space_pos.z / clip_space_pos.w) * 0.5 + 0.5;
-                        // 7. Visualize the now CONSISTENT normal vector.
-                        vec3 normal_color = normal * 0.5 + 0.5;
-                        
-                        FragColor = vec4(normal_color, 1.0);
-                        return;
-                    }
+                float dist = dot(p - plane_center, plane_normal);
+                if (abs(dist) < 0.1) {
+                    vec3 normal_color = plane_normal * 0.5 + 0.5;
+                    FragColor = vec4(normal_color, 1.0);
+                    return;
                 }
 
             }
-
-            if (tmax.x < tmax.y) {
-                if (tmax.x < tmax.z) { pos.x += step.x; tmax.x += delta.x; }
-                else { pos.z += step.z; tmax.z += delta.z; }
-            } else {
-                if (tmax.y < tmax.z) { pos.y += step.y; tmax.y += delta.y; }
-                else { pos.z += step.z; tmax.z += delta.z; }
-            }
-            if (pos.x < 0 || pos.x >= GRID_SIZE || pos.y < 0 || pos.y >= GRID_SIZE || pos.z < 0 || pos.z >= GRID_SIZE) break;
+            t += STEP_SIZE;
         }
-
-        FragColor = vec4(0.1, 0.1, 0.2, 1.0);
-        return;
+        FragColor = vec4(0.1, 0.1, 0.1, 1.0); // didnt hit a voxel
     } else {
-        // --- Main Traversal Loop ---
-        vec3 hit_normal = vec3(0.0);
-        for(int i = 0; i < MAX_STEPS; ++i) {
+        for (int i = 0; i < MAX_STEPS; ++i) {
+            vec3 p = ro + rd * t;
+            ivec3 pos = ivec3(floor(p));
 
-            // check if voxel at current position is solid
-            // sample texture at center of voxel
-            vec3 sample_pos = (vec3(pos) + 0.5) / GRID_SIZE;
-            if (texture(voxelData, sample_pos).r > 0.0) { // hit
+            if (texelFetch(voxelData, pos, 0).r > 0.0) { // hit a voxel
+                vec3 p_prev = ro + (t - STEP_SIZE) * rd;
+                
+                ivec3 pos_prev = ivec3(floor(p_prev));
+                
+                vec3 hit_normal = normalize(vec3(pos_prev - pos));
+
                 FragColor = vec4(abs(hit_normal) * 0.7 + 0.3, 1.0);
                 return;
             }
-
-            // Advance to the next voxel based on the smallest tmax.
-            if (tmax.x < tmax.y) {
-                if (tmax.x < tmax.z) {
-                    pos.x += step.x;
-                    hit_normal = vec3(-step.x, 0, 0);
-                } else {
-                    pos.z += step.z;
-                    hit_normal = vec3(0, 0, -step.z);
-                }
-            } else {
-                if (tmax.y < tmax.z) {
-                    pos.y += step.y;
-                    hit_normal = vec3(0, -step.y, 0);
-                } else {
-                    pos.z += step.z;
-                    hit_normal = vec3(0, 0, -step.z);
-                }
-            }
-
-            // update the tmax value for the axis we just stepped on.
-            if (tmax.x < tmax.y) {
-                if (tmax.x < tmax.z) {
-                    tmax.x += delta.x;
-                } else {
-                    tmax.z += delta.z;
-                }
-            } else {
-                if (tmax.y < tmax.z) {
-                    tmax.y += delta.y;
-                } else {
-                    tmax.z += delta.z;
-                }
-            }
-
-
-            // check if outside grid
-            if (pos.x < 0 || pos.x >= GRID_SIZE ||
-                pos.y < 0 || pos.y >= GRID_SIZE ||
-                pos.z < 0 || pos.z >= GRID_SIZE) {
-                break; // Exited grid
-            }
+            t += STEP_SIZE;
         }
+        
+        FragColor = vec4(0.1, 0.1, 0.1, 1.0); // didnt hit a voxel
     }
-
-    // no hit
-    FragColor = vec4(0.1, 0.1, 0.2, 1.0); // Background color
 }
