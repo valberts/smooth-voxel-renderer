@@ -12,15 +12,6 @@ bool checkBounds = 1;
 int k_neighbors = 64;
 int neighborhood_ring_size = 1;
 
-// --- test mode ---
-bool testMode = false;
-enum TestCase
-{
-    TEST_SINGLE_CENTER, // Single voxel at center (1,1,1)
-    TEST_LINE_X,        // Line along X axis (3 voxels)
-};
-int currentTestCase = TestCase::TEST_SINGLE_CENTER;
-
 // --- camera ---
 Camera camera(glm::vec3(GRID_SIZE * 1.5f, GRID_SIZE * 1.5f, GRID_SIZE * 1.5f));
 
@@ -50,6 +41,23 @@ enum ShapeType
     SHAPE_CUBE
 };
 ShapeType currentShape = SHAPE_SPHERE;
+
+// --- test mode ---
+bool testMode = false;
+enum TestCase
+{
+    TEST_SINGLE_CENTER, // Single voxel at center (1,1,1)
+    TEST_LINE_X,        // Line along X axis (3 voxels)
+    TEST_PLANE_XZ,
+    TEST_STAIRS,
+    TEST_STAIRS2,
+    TEST_STAIRS3,
+    TEST_STAIRS4,
+    TEST_CORNER,
+    TEST_CORNER2,
+    TEST_CUBE
+};
+int currentTestCase = TestCase::TEST_SINGLE_CENTER;
 
 int main()
 {
@@ -239,8 +247,16 @@ void drawGui(float deltaTime)
         if (testMode)
         {
             const char *testCaseItems[] = {
-                "Single Center (1,1,1)",
-                "Line X (3 voxels)"};
+                "Single Center",
+                "Line",
+                "Plane",
+                "Stairs",
+                "Stairs2",
+                "Stairs3",
+                "Stairs4",
+                "Corner",
+                "Corner2",
+                "Cube"};
             int current_test_index = static_cast<int>(currentTestCase);
 
             if (ImGui::Combo("Test Case", &current_test_index, testCaseItems, IM_ARRAYSIZE(testCaseItems)))
@@ -523,6 +539,8 @@ void setupVoxelTexture()
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
     // Upload the voxel data. We use GL_RED because we only have one channel (on/off).
     glTexImage3D(GL_TEXTURE_3D, 0, GL_RED, GRID_SIZE, GRID_SIZE, GRID_SIZE, 0,
                  GL_RED, GL_UNSIGNED_BYTE, voxelGrid.data());
@@ -669,10 +687,19 @@ int coordsToIndex(int x, int y, int z)
 {
     if (x < 0 || x >= GRID_SIZE || y < 0 || y >= GRID_SIZE || z < 0 || z >= GRID_SIZE)
     {
-        return -1; // Invalid coordinates
+        return -1;
     }
     return x + y * GRID_SIZE + z * GRID_SIZE * GRID_SIZE;
-    // return x + GRID_SIZE * (y * GRID_SIZE * z);
+}
+
+void placeVoxel(int x, int y, int z)
+{
+    // assumes GRID_SIZE = 3
+    if (x < 0 || x >= 3 || y < 0 || y >= 3 || z < 0 || z >= 3)
+    {
+        return;
+    }
+    voxelGrid[x + y * 3 + z * 3 * 3] = 255;
 }
 
 void setupTestCase()
@@ -683,21 +710,121 @@ void setupTestCase()
     {
     case TestCase::TEST_SINGLE_CENTER:
     {
-        int index = coordsToIndex(GRID_SIZE / 2, GRID_SIZE / 2, GRID_SIZE / 2);
-        if (index != -1)
-        {
-            voxelGrid[index] = 255;
-        }
+        placeVoxel(1, 1, 1);
         break;
     }
     case TestCase::TEST_LINE_X:
     {
-        for (int i = 0; i < GRID_SIZE; i++)
+        placeVoxel(0, 1, 1);
+        placeVoxel(1, 1, 1);
+        placeVoxel(2, 1, 1);
+        break;
+    }
+    case TestCase::TEST_PLANE_XZ:
+    {
+        for (int x = 0; x < 3; ++x)
         {
-            int index = coordsToIndex(i, GRID_SIZE / 2, GRID_SIZE / 2);
-            if (index != -1)
+            for (int z = 0; z < 3; ++z)
             {
-                voxelGrid[index] = 255;
+                placeVoxel(x, 1, z);
+            }
+        }
+        break;
+    }
+    case TestCase::TEST_STAIRS:
+    {
+        placeVoxel(0, 0, 0);
+        placeVoxel(1, 0, 0);
+        placeVoxel(1, 1, 0);
+        placeVoxel(2, 1, 0);
+        placeVoxel(2, 2, 0);
+        break;
+    }
+    case TestCase::TEST_STAIRS2:
+    {
+        placeVoxel(0, 0, 0);
+        placeVoxel(1, 0, 0);
+        placeVoxel(1, 1, 0);
+        placeVoxel(2, 1, 0);
+        placeVoxel(2, 2, 0);
+
+        placeVoxel(0, 0, 1);
+        placeVoxel(1, 0, 1);
+        placeVoxel(1, 1, 1);
+        placeVoxel(2, 1, 1);
+        placeVoxel(2, 2, 1);
+        break;
+    }
+    case TestCase::TEST_STAIRS3:
+    {
+        placeVoxel(0, 0, 0);
+        placeVoxel(1, 0, 0);
+        placeVoxel(1, 1, 0);
+        placeVoxel(2, 1, 0);
+        placeVoxel(2, 2, 0);
+
+        placeVoxel(0, 0, 1);
+        placeVoxel(1, 0, 1);
+        placeVoxel(1, 1, 1);
+        placeVoxel(2, 1, 1);
+        placeVoxel(2, 2, 1);
+
+        placeVoxel(0, 0, 2);
+        placeVoxel(1, 0, 2);
+        placeVoxel(1, 1, 2);
+        placeVoxel(2, 1, 2);
+        placeVoxel(2, 2, 2);
+        break;
+    }
+
+    case TestCase::TEST_STAIRS4:
+    {
+        placeVoxel(0, 0, 0);
+        placeVoxel(1, 1, 0);
+        placeVoxel(2, 2, 0);
+
+        placeVoxel(0, 0, 1);
+        placeVoxel(1, 1, 1);
+        placeVoxel(2, 2, 1);
+
+        placeVoxel(0, 0, 2);
+        placeVoxel(1, 1, 2);
+        placeVoxel(2, 2, 2);
+        break;
+    }
+    case TestCase::TEST_CORNER:
+    {
+        placeVoxel(0, 0, 0);
+        placeVoxel(0, 0, 1);
+        placeVoxel(0, 0, 2);
+        placeVoxel(0, 1, 2);
+        placeVoxel(0, 2, 2);
+        break;
+    }
+    case TestCase::TEST_CORNER2:
+    {
+        placeVoxel(0, 0, 0);
+        placeVoxel(0, 0, 1);
+        placeVoxel(0, 0, 2);
+
+        placeVoxel(0, 1, 2);
+        placeVoxel(0, 2, 2);
+
+        placeVoxel(1, 0, 2);
+        placeVoxel(2, 0, 2);
+
+        break;
+    }
+    case TestCase::TEST_CUBE:
+    {
+        for (int z = 0; z < GRID_SIZE; z++)
+        {
+            for (int y = 0; y < GRID_SIZE; y++)
+            {
+                for (int x = 0; x < GRID_SIZE; x++)
+                {
+                    placeVoxel(x, y, z);
+                }
             }
         }
         break;
