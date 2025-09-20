@@ -11,8 +11,9 @@ uniform mat4 invProjection;
 uniform mat4 invView;
 uniform vec3 cameraPos;
 uniform int neighborhoodRingSize; // 1=3x3, 2=5x5, 3=7x7
+uniform bool checkBounds;
+uniform int gridSize;
 
-const int GRID_SIZE = 64;
 const int MAX_NEIGHBORS = 343;
 
 int getVoxelNeighborhood(ivec3 coord, int ringSize, out vec3 neighbors[MAX_NEIGHBORS]) {
@@ -24,9 +25,9 @@ int getVoxelNeighborhood(ivec3 coord, int ringSize, out vec3 neighbors[MAX_NEIGH
 
                 ivec3 neighbor_coord = coord + ivec3(x, y, z);
                 
-                if (neighbor_coord.x < 0 || neighbor_coord.x >= GRID_SIZE ||
-                    neighbor_coord.y < 0 || neighbor_coord.y >= GRID_SIZE ||
-                    neighbor_coord.z < 0 || neighbor_coord.z >= GRID_SIZE) {
+                if (neighbor_coord.x < 0 || neighbor_coord.x >= gridSize ||
+                    neighbor_coord.y < 0 || neighbor_coord.y >= gridSize ||
+                    neighbor_coord.z < 0 || neighbor_coord.z >= gridSize) {
                     continue; 
                 }
 
@@ -54,16 +55,16 @@ vec3 calculateCentroid(vec3 neighbors[MAX_NEIGHBORS], int count) {
     return sum / float(count);
 }
 
-mat3 calculateCovarianceMatrix(vec3 neighbors[MAX_NEIGHBORS], int count, vec3 mean) {
+mat3 calculateCovarianceMatrix (vec3 neighbors[MAX_NEIGHBORS], int count, vec3 mean) {
+    if (count <= 1) {
+        return mat3(0.0);
+    }
+
     mat3 covariance = mat3(0.0);
 
     for (int i = 0; i < count; ++i) {
         vec3 diff = neighbors[i] - mean;
         covariance += outerProduct(diff, diff);
-    }
-
-    if (count <=1) {
-        return mat3(0.0);
     }
 
     covariance = covariance / float(count - 1);
@@ -72,9 +73,11 @@ mat3 calculateCovarianceMatrix(vec3 neighbors[MAX_NEIGHBORS], int count, vec3 me
 }
 
 vec3 computeEigenvector(mat3 M, float eigenvalue) {
-    vec3 row0 = vec3(M[0][0] - eigenvalue, M[0][1], M[0][2]);
-    vec3 row1 = vec3(M[1][0], M[1][1] - eigenvalue, M[1][2]);
-    vec3 row2 = vec3(M[2][0], M[2][1], M[2][2] - eigenvalue);
+    mat3 A = M - eigenvalue * mat3(1.0);
+    
+    vec3 row0 = vec3(A[0][0], A[0][1], A[0][2]);
+    vec3 row1 = vec3(A[1][0], A[1][1], A[1][2]);
+    vec3 row2 = vec3(A[2][0], A[2][1], A[2][2]);
 
     vec3 r0xr1 = cross(row0, row1);
     vec3 r0xr2 = cross(row0, row2);
@@ -84,44 +87,60 @@ vec3 computeEigenvector(mat3 M, float eigenvalue) {
     float d1 = dot(r0xr2, r0xr2);
     float d2 = dot(r1xr2, r1xr2);
 
+    vec3 eigenvec;
     if (d0 > d1 && d0 > d2) {
-        return normalize(r0xr1);
+        eigenvec = r0xr1;
+    } else if (d1 > d2) {
+        eigenvec = r0xr2;
+    } else {
+        eigenvec = r1xr2;
     }
-    if (d1 > d2) {
-        return normalize(r0xr2);
+    
+    float len = length(eigenvec);
+    if (len < 1e-6) {
+        return vec3(0.0, 0.0, 1.0);
     }
-    return normalize(r1xr2);
+    
+    return eigenvec / len;
 }
 
 void solveEigenSystem(mat3 M, out vec3 eigenvalues, out mat3 eigenvectors) {
+    
     float m = (M[0][0] + M[1][1] + M[2][2]) / 3.0;
-    float c1_sq = (M[0][0]-m)*(M[0][0]-m) + (M[1][1]-m)*(M[1][1]-m) + (M[2][2]-m)*(M[2][2]-m) + 2.0 * (M[0][1]*M[0][1] + M[0][2]*M[0][2] + M[1][2]*M[1][2]);
-    float c0 = -((M[0][0]-m)*((M[1][1]-m)*(M[2][2]-m) - M[1][2]*M[1][2]) - M[0][1]*(M[0][1]*(M[2][2]-m) - M[0][2]*M[1][2]) + M[0][2]*(M[0][1]*M[1][2] - M[0][2]*(M[1][1]-m)));
+    
+    float c1_sq = (M[0][0]-m)*(M[0][0]-m) + (M[1][1]-m)*(M[1][1]-m) + (M[2][2]-m)*(M[2][2]-m) 
+                  + 2.0 * (M[0][1]*M[0][1] + M[0][2]*M[0][2] + M[1][2]*M[1][2]);
+    
+    float det_M_minus_mI = (M[0][0]-m)*((M[1][1]-m)*(M[2][2]-m) - M[1][2]*M[1][2])
+                         - M[0][1]*(M[0][1]*(M[2][2]-m) - M[0][2]*M[1][2])
+                         + M[0][2]*(M[0][1]*M[1][2] - M[0][2]*(M[1][1]-m));
+    float c0 = -det_M_minus_mI;
 
     float c1_sq_safe = max(c1_sq, 0.0);
     float p = sqrt(c1_sq_safe/6.0);
     
-    if (p < 1e-6) {
+    if (p < 1e-8) {
         eigenvalues = vec3(m);
-        eigenvectors = mat3(1.0);
+        eigenvectors = mat3(1.0, 0.0, 0.0,
+                           0.0, 1.0, 0.0,
+                           0.0, 0.0, 1.0);
         return;
     }
 
     float inv_p = 1.0 / p;
     float b = 0.5 * c0 * inv_p * inv_p * inv_p;
-    
     float phi = 0.0;
     if (b >= 1.0) phi = 0.0;
     else if (b <= -1.0) phi = M_PI/3.0;
     else phi = acos(b)/3.0;
 
     eigenvalues.x = m + 2.0 * p * cos(phi);
-    eigenvalues.y = m + 2.0 * p * cos(phi + (2.0*M_PI/3.0));
-    eigenvalues.z = 3.0 * m - eigenvalues.x - eigenvalues.y;
+    eigenvalues.z = m + 2.0 * p * cos(phi + (2.0*M_PI/3.0));
+    eigenvalues.y = 3.0 * m - eigenvalues.x - eigenvalues.z;
 
     eigenvectors[0] = computeEigenvector(M, eigenvalues.x);
     eigenvectors[1] = computeEigenvector(M, eigenvalues.y);
-    eigenvectors[2] = cross(eigenvectors[0], eigenvectors[1]);
+    eigenvectors[2] = computeEigenvector(M, eigenvalues.z); // not taking cross
 }
 
 float ray_aabb(const in vec3 ro, const in vec3 rd, const in vec3 grid_min, const in vec3 grid_max) {
@@ -153,6 +172,17 @@ float map(vec3 p) {
     return dot(p - center, normal);
 }
 
+bool intersectPlane(vec3 ro, vec3 rd, vec3 plane_center, vec3 plane_normal, out float t) {
+    float denom = dot(plane_normal, rd);
+    if (abs(denom) > 1e-6) { 
+        vec3 dist = plane_center - ro;
+        t = dot(dist, plane_normal) / denom;
+        return (t >= 0.0);
+    }
+
+    return false;
+}
+
 void main()
 {
     // ray generation
@@ -164,76 +194,153 @@ void main()
 
     // bounding box intersection
     vec3 grid_min = vec3(0.0);
-    vec3 grid_max = vec3(GRID_SIZE);
+    vec3 grid_max = vec3(gridSize);
     float t = ray_aabb(ro, rd, grid_min, grid_max);
     if (t == 1e30) { // didnt hit bounding box
         FragColor = vec4(0.1, 0.1, 0.1, 1.0);
         return;
     }
 
-    const float STEP_SIZE = 0.05;
-    const int MAX_STEPS = 1024;
-    const float T_MIN = 0.1;
+    const int MAX_STEPS = 256;
+    const float T_MIN = 0.001;
 
     t = max(t, T_MIN);
+    vec3 start_pos = ro + rd * t;
     
-    if (usePlaneFitting) {
-        for (int i = 0; i < MAX_STEPS; ++i) {
-            vec3 p = ro + rd * t;
-            ivec3 pos = ivec3(floor(p));
-
-            if (texelFetch(voxelData, pos, 0).r > 0.0) { // hit a voxel
+    // DDA initialization
+    ivec3 voxel = ivec3(floor(start_pos));
+    vec3 delta_t = abs(1.0 / rd);
+    ivec3 step = ivec3(sign(rd));
+    
+    // If starting outside grid, clamp to grid boundaries
+    voxel = clamp(voxel, ivec3(0), ivec3(gridSize - 1));
+    
+    // Recalculate start position if we clamped the voxel
+    vec3 grid_start_pos = vec3(voxel) + 0.5;
+    
+    vec3 t_max;
+    for (int i = 0; i < 3; ++i) {
+        if (step[i] > 0) {
+            t_max[i] = t + (float(voxel[i] + 1) - start_pos[i]) * delta_t[i];
+        } else {
+            t_max[i] = t + (start_pos[i] - float(voxel[i])) * delta_t[i];
+        }
+        
+        // Handle case where we're outside the grid
+        if (start_pos[i] < 0.0 && step[i] > 0) {
+            t_max[i] = t + (1.0 - start_pos[i]) * delta_t[i];
+        } else if (start_pos[i] >= float(gridSize) && step[i] < 0) {
+            t_max[i] = t + (start_pos[i] - float(gridSize - 1)) * delta_t[i];
+        }
+    }
+    
+    // DDA traversal
+    for (int i = 0; i < MAX_STEPS; ++i) {
+        if (voxel.x < 0 || voxel.x >= gridSize ||
+            voxel.y < 0 || voxel.y >= gridSize ||
+            voxel.z < 0 || voxel.z >= gridSize) {
+            break;
+        }
+        
+        if (texelFetch(voxelData, voxel, 0).r > 0.0) {
+            vec3 hit_normal;
+             
+            if (usePlaneFitting) {
                 vec3 neighbors[MAX_NEIGHBORS];
-                int neighbor_count = getVoxelNeighborhood(pos, neighborhoodRingSize, neighbors);
+                int neighbor_count = getVoxelNeighborhood(voxel, neighborhoodRingSize, neighbors);
+                
+                // // not enough neighbors
+                // if (neighbor_count < 3) {
+                //     discard;
+                // }
 
                 vec3 plane_center = calculateCentroid(neighbors, neighbor_count);
+                
                 mat3 covariance = calculateCovarianceMatrix(neighbors, neighbor_count, plane_center);
-
+                
                 vec3 eigenvalues;
                 mat3 eigenvectors;
                 solveEigenSystem(covariance, eigenvalues, eigenvectors);
-                int smallest_idx = 0;
-                if (eigenvalues.y < eigenvalues.x) smallest_idx = 1;
-                if (eigenvalues.z < eigenvalues[smallest_idx]) smallest_idx = 2;
-                vec3 plane_normal = eigenvectors[smallest_idx];
 
-                // --- consistent orientation---
-                vec3 object_center = vec3(GRID_SIZE / 2.0);
-                vec3 hit_voxel_center = vec3(pos) + 0.5;
-                vec3 out_vector = hit_voxel_center - object_center;
-                if (dot(plane_normal, out_vector) < 0.0) {
+                int smallest_eigenvalue = 0;
+                if (eigenvalues[1] < eigenvalues[smallest_eigenvalue]) {
+                    smallest_eigenvalue = 1;
+                }
+                if (eigenvalues[2] < eigenvalues[smallest_eigenvalue]) {
+                    smallest_eigenvalue = 2;
+                }
+                vec3 plane_normal = eigenvectors[smallest_eigenvalue];
+                
+                vec3 view_direction = normalize(ro - (vec3(voxel) + 0.5));
+                if (dot(plane_normal, view_direction) < 0.0) {
                     plane_normal = -plane_normal;
                 }
+                
+                float t;
+                bool hit = intersectPlane(ro, rd, plane_center, plane_normal, t);
+                
+                if (hit) {
+                    vec3 intersection_point = ro + rd * t;
+                    ivec3 voxel_coords = ivec3(floor(intersection_point));
 
-                float dist = dot(p - plane_center, plane_normal);
-                if (abs(dist) < 0.1) {
-                    vec3 normal_color = plane_normal * 0.5 + 0.5;
-                    FragColor = vec4(normal_color, 1.0);
-                    return;
+                    // phong
+
+                    // vec3 hit_view = cameraPos - intersection_point;
+                    // hit_view = normalize(hit_view);
+                    // float res = dot(hit_view, plane_normal);
+                    // res = res * res;
+                    // FragColor = vec4(res, res, res, 1.0);
+                    // return;
+
+                    if (checkBounds) {
+                    if (all(equal(voxel_coords, voxel))) {
+                        plane_normal = normalize(plane_normal);
+                        hit_normal = plane_normal;
+                        FragColor = vec4(abs(hit_normal) * 0.7 + 0.3, 1.0);
+                        return;
+                    }
+                    }
+                    else {
+                        plane_normal = normalize(plane_normal);
+                        hit_normal = plane_normal;
+                        FragColor = vec4(abs(hit_normal) * 0.7 + 0.3, 1.0);
+                        return;
+                    }
+                    // if the intersection point isnt in the current voxel, we continue voxel traversal
                 }
 
-            }
-            t += STEP_SIZE;
-        }
-        FragColor = vec4(0.1, 0.1, 0.1, 1.0); // didnt hit a voxel
-    } else {
-        for (int i = 0; i < MAX_STEPS; ++i) {
-            vec3 p = ro + rd * t;
-            ivec3 pos = ivec3(floor(p));
-
-            if (texelFetch(voxelData, pos, 0).r > 0.0) { // hit a voxel
-                vec3 p_prev = ro + (t - STEP_SIZE) * rd;
-                
-                ivec3 pos_prev = ivec3(floor(p_prev));
-                
-                vec3 hit_normal = normalize(vec3(pos_prev - pos));
-
+            } else {
+                if (t_max.x - delta_t.x > t_max.y - delta_t.y && t_max.x - delta_t.x > t_max.z - delta_t.z) {
+                    hit_normal = vec3(-step.x, 0.0, 0.0);
+                } else if (t_max.y - delta_t.y > t_max.z - delta_t.z) {
+                    hit_normal = vec3(0.0, -step.y, 0.0);
+                } else {
+                    hit_normal = vec3(0.0, 0.0, -step.z);
+                }
                 FragColor = vec4(abs(hit_normal) * 0.7 + 0.3, 1.0);
                 return;
             }
-            t += STEP_SIZE;
         }
         
-        FragColor = vec4(0.1, 0.1, 0.1, 1.0); // didnt hit a voxel
+        // step to next voxel
+        if (t_max.x < t_max.y) {
+            if (t_max.x < t_max.z) {
+                voxel.x += step.x;
+                t_max.x += delta_t.x;
+            } else {
+                voxel.z += step.z;
+                t_max.z += delta_t.z;
+            }
+        } else {
+            if (t_max.y < t_max.z) {
+                voxel.y += step.y;
+                t_max.y += delta_t.y;
+            } else {
+                voxel.z += step.z;
+                t_max.z += delta_t.z;
+            }
+        }
     }
+    
+    FragColor = vec4(0.1, 0.1, 0.1, 1.0); // didnt hit a voxel
 }

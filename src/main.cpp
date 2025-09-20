@@ -2,14 +2,24 @@
 
 // --- globals ---
 unsigned int VAO, VBO;
-const int GRID_SIZE = 64;
+int GRID_SIZE = 64;
 std::vector<unsigned char> voxelGrid(GRID_SIZE *GRID_SIZE *GRID_SIZE, 0);
 unsigned int voxelTexture;
 unsigned int sdfCentersTexture;
 unsigned int sdfNormalsTexture;
 bool usePlaneFitting = 1;
+bool checkBounds = 1;
 int k_neighbors = 64;
 int neighborhood_ring_size = 1;
+
+// --- test mode ---
+bool testMode = false;
+enum TestCase
+{
+    TEST_SINGLE_CENTER, // Single voxel at center (1,1,1)
+    TEST_LINE_X,        // Line along X axis (3 voxels)
+};
+int currentTestCase = TestCase::TEST_SINGLE_CENTER;
 
 // --- camera ---
 Camera camera(glm::vec3(GRID_SIZE * 1.5f, GRID_SIZE * 1.5f, GRID_SIZE * 1.5f));
@@ -28,15 +38,18 @@ void processInput(GLFWwindow *window);
 void precomputeSdf();
 void setupSdfTextures(const std::vector<float> &centerData, const std::vector<float> &normalData);
 void drawGui(float deltaTime);
+void setupTestCase();
+int coordsToIndex(int x, int y, int z);
 
 // --- shape ---
-enum ShapeType {
+enum ShapeType
+{
     SHAPE_SPHERE,
     SHAPE_STAIRCASE_1_1,
     SHAPE_STAIRCASE_2_1,
     SHAPE_CUBE
 };
-ShapeType currentShape = SHAPE_SPHERE; 
+ShapeType currentShape = SHAPE_SPHERE;
 
 int main()
 {
@@ -73,7 +86,7 @@ int main()
     unsigned int shader = make_shader("src/shaders/shader.vert", "src/shaders/shader.frag");
 
     setupVoxelGrid();
-    //precomputeSdf();
+    // precomputeSdf();
     setupVoxelTexture();
     setupQuad();
 
@@ -106,7 +119,9 @@ int main()
         glUniformMatrix4fv(glGetUniformLocation(shader, "invView"), 1, GL_FALSE, glm::value_ptr(invView));
         glUniform3fv(glGetUniformLocation(shader, "cameraPos"), 1, glm::value_ptr(camera.Position));
         glUniform1i(glGetUniformLocation(shader, "usePlaneFitting"), usePlaneFitting); // 1 on, 0 off
+        glUniform1i(glGetUniformLocation(shader, "checkBounds"), checkBounds);         // 1 on, 0 off
         glUniform1i(glGetUniformLocation(shader, "neighborhoodRingSize"), neighborhood_ring_size);
+        glUniform1i(glGetUniformLocation(shader, "gridSize"), GRID_SIZE);
 
         // bind voxel data texture and draw
         glActiveTexture(GL_TEXTURE0);
@@ -189,50 +204,58 @@ void drawGui(float deltaTime)
                     camera.Position.x, camera.Position.y, camera.Position.z);
         ImGui::Separator();
         ImGui::Checkbox("Use Plane Fitting", &usePlaneFitting);
+        ImGui::Checkbox("Check Bounds", &checkBounds);
 
         ImGui::Separator();
 
-        // --- Shape Selector ---
-        const char* items[] = {
-            "Sphere",
-            "Staircase (1:1)",
-            "Staircase (2:1)",
-            "Cube"
-        };
-        int current_item_index = static_cast<int>(currentShape); 
+        // --- Shape Selector (only show in normal mode) ---
+        if (!testMode)
+        {
+            const char *items[] = {
+                "Sphere",
+                "Staircase (1:1)",
+                "Staircase (2:1)",
+                "Cube"};
+            int current_item_index = static_cast<int>(currentShape);
 
-        if (ImGui::Combo("Shape", &current_item_index, items, IM_ARRAYSIZE(items))) {
-            currentShape = static_cast<ShapeType>(current_item_index); 
-            std::cout << "Shape changed, regenerating voxel grid..." << std::endl;
-            setupVoxelGrid();
-            //precomputeSdf();
-        }
-
-        ImGui::Separator();
-
-        // --- k-Neighborhood Selector ---
-        const char* k_items[] = { "1", "2", "4", "8", "16", "32", "64" };
-        const int k_values[] = { 1,   2,   4,   8,   16,   32,   64 };
-
-        int current_k_index = -1;
-        for (int n = 0; n < IM_ARRAYSIZE(k_values); n++) {
-            if (k_values[n] == k_neighbors) {
-                current_k_index = n;
-                break;
+            if (ImGui::Combo("Shape", &current_item_index, items, IM_ARRAYSIZE(items)))
+            {
+                currentShape = static_cast<ShapeType>(current_item_index);
+                std::cout << "Shape changed, regenerating voxel grid..." << std::endl;
+                setupVoxelGrid();
+                // precomputeSdf();
             }
         }
 
-        if (current_k_index == -1) {
-            current_k_index = 6;
-            k_neighbors = k_values[current_k_index];
+        // --- Test Case Selector (only show in test mode) ---
+        if (testMode)
+        {
+            const char *testCaseItems[] = {
+                "Single Center (1,1,1)",
+                "Line X (3 voxels)"};
+            int current_test_index = static_cast<int>(currentTestCase);
+
+            if (ImGui::Combo("Test Case", &current_test_index, testCaseItems, IM_ARRAYSIZE(testCaseItems)))
+            {
+                currentTestCase = static_cast<TestCase>(current_test_index);
+                std::cout << "Test case changed, regenerating voxel grid..." << std::endl;
+                setupVoxelGrid();
+            }
+
+            // Show current grid size for reference
+            ImGui::Text("Grid Size: %dx%dx%d", GRID_SIZE, GRID_SIZE, GRID_SIZE);
+        }
+        else
+        {
+            // Show current grid size for normal mode too
+            ImGui::Text("Grid Size: %dx%dx%d", GRID_SIZE, GRID_SIZE, GRID_SIZE);
         }
 
-
-        if (ImGui::Combo("k-Neighbors", &current_k_index, k_items, IM_ARRAYSIZE(k_items))) {
-            k_neighbors = k_values[current_k_index];
-
-            std::cout << "k value changed to " << k_neighbors << ", re-computing SDF..." << std::endl;
-            precomputeSdf();
+        // --- Test Mode Toggle ---
+        if (ImGui::Checkbox("Test Mode (3x3x3)", &testMode))
+        {
+            std::cout << "Test mode " << (testMode ? "enabled" : "disabled") << ", regenerating voxel grid..." << std::endl;
+            setupVoxelGrid();
         }
 
         ImGui::Separator();
@@ -342,58 +365,82 @@ void setupQuad()
     glBindVertexArray(0);
 }
 
-void generateSphere() {
+void generateSphere()
+{
     glm::vec3 center(GRID_SIZE / 2.0f);
     float radius = GRID_SIZE / 12.0f;
     float thickness = 1.5f;
-    for (int z = 0; z < GRID_SIZE; ++z) for (int y = 0; y < GRID_SIZE; ++y) for (int x = 0; x < GRID_SIZE; ++x) {
-        float dist = glm::distance(glm::vec3(x, y, z), center);
-        if (abs(dist - radius) < thickness) {
-            voxelGrid[x + y * GRID_SIZE + z * GRID_SIZE * GRID_SIZE] = 255;
-        }
-    }
+    for (int z = 0; z < GRID_SIZE; ++z)
+        for (int y = 0; y < GRID_SIZE; ++y)
+            for (int x = 0; x < GRID_SIZE; ++x)
+            {
+                float dist = glm::distance(glm::vec3(x, y, z), center);
+                if (abs(dist - radius) < thickness)
+                {
+                    voxelGrid[x + y * GRID_SIZE + z * GRID_SIZE * GRID_SIZE] = 255;
+                }
+            }
 }
 
-void generateStaircase(int treadWidth, int riserHeight) {
+void generateStaircase(int treadWidth, int riserHeight)
+{
     int start_x = GRID_SIZE / 12;
     int start_y = GRID_SIZE / 12;
     int num_steps = 10;
-    int depth = 4; 
+    int depth = 4;
 
-    auto placeVoxelSlab = [&](int x, int y) {
-        for (int z = start_y; z < start_y + depth; ++z) {
-            if (x >= 0 && x < GRID_SIZE && y >= 0 && y < GRID_SIZE && z >= 0 && z < GRID_SIZE) {
+    auto placeVoxelSlab = [&](int x, int y)
+    {
+        for (int z = start_y; z < start_y + depth; ++z)
+        {
+            if (x >= 0 && x < GRID_SIZE && y >= 0 && y < GRID_SIZE && z >= 0 && z < GRID_SIZE)
+            {
                 voxelGrid[x + y * GRID_SIZE + z * GRID_SIZE * GRID_SIZE] = 255;
             }
         }
     };
 
-    for (int i = 0; i < num_steps; ++i) {
+    for (int i = 0; i < num_steps; ++i)
+    {
 
         int x_base = start_x + i * treadWidth;
         int y_base = start_y + i * riserHeight;
 
-        for (int t = 0; t < treadWidth; ++t) {
+        for (int t = 0; t < treadWidth; ++t)
+        {
             placeVoxelSlab(x_base + t, y_base);
         }
 
-        for (int r = 0; r < riserHeight; ++r) {
+        for (int r = 0; r < riserHeight; ++r)
+        {
             placeVoxelSlab(x_base + treadWidth, y_base + r);
         }
     }
 }
 
-void generateCube() {
+void generateCube(int thickness = 1)
+{
     int min_coord = GRID_SIZE / 12;
     int max_coord = GRID_SIZE * 3 / 12;
 
-    for (int x = min_coord; x <= max_coord; ++x) {
-        for (int y = min_coord; y <= max_coord; ++y) {
-            for (int z = min_coord; z <= max_coord; ++z) {
-                if (x == min_coord || x == max_coord ||
-                    y == min_coord || y == max_coord ||
-                    z == min_coord || z == max_coord) {
+    for (int x = min_coord; x <= max_coord; ++x)
+    {
+        for (int y = min_coord; y <= max_coord; ++y)
+        {
+            for (int z = min_coord; z <= max_coord; ++z)
+            {
+                // Calculate distance to nearest face
+                int dist_to_face = std::min({
+                    x - min_coord, // distance to left face
+                    max_coord - x, // distance to right face
+                    y - min_coord, // distance to bottom face
+                    max_coord - y, // distance to top face
+                    z - min_coord, // distance to front face
+                    max_coord - z  // distance to back face
+                });
 
+                if (dist_to_face < thickness)
+                {
                     voxelGrid[x + y * GRID_SIZE + z * GRID_SIZE * GRID_SIZE] = 255;
                 }
             }
@@ -401,22 +448,46 @@ void generateCube() {
     }
 }
 
-void setupVoxelGrid() {
+void setupVoxelGrid()
+{
+    // Set grid size based on test mode
+    if (testMode)
+    {
+        GRID_SIZE = 3;
+        voxelGrid.resize(3 * 3 * 3, 0);
+    }
+    else
+    {
+        GRID_SIZE = 64;
+        voxelGrid.resize(64 * 64 * 64, 0);
+    }
+
+    // should we update camera position for new grid size?
+
     std::fill(voxelGrid.begin(), voxelGrid.end(), 0);
 
-    switch (currentShape) {
-    case SHAPE_SPHERE:
-        generateSphere();
-        break;
-    case SHAPE_STAIRCASE_1_1:
-        generateStaircase(1, 1);
-        break;
-    case SHAPE_STAIRCASE_2_1:
-        generateStaircase(2, 1);
-        break;
-    case SHAPE_CUBE:
-        generateCube();
-        break;
+    if (testMode)
+    {
+        // generate a test case
+        setupTestCase();
+    }
+    else
+    {
+        switch (currentShape)
+        {
+        case SHAPE_SPHERE:
+            generateSphere();
+            break;
+        case SHAPE_STAIRCASE_1_1:
+            generateStaircase(1, 1);
+            break;
+        case SHAPE_STAIRCASE_2_1:
+            generateStaircase(2, 1);
+            break;
+        case SHAPE_CUBE:
+            generateCube();
+            break;
+        }
     }
 
     setupVoxelTexture();
@@ -573,4 +644,45 @@ void setupSdfTextures(const std::vector<float> &centerData, const std::vector<fl
                  GL_RGB, GL_FLOAT, normalData.data());
 
     std::cout << "SDF normals texture created and uploaded." << std::endl;
+}
+
+// Convert 3D coordinates to 1D index in the voxel grid
+int coordsToIndex(int x, int y, int z)
+{
+    if (x < 0 || x >= GRID_SIZE || y < 0 || y >= GRID_SIZE || z < 0 || z >= GRID_SIZE)
+    {
+        return -1; // Invalid coordinates
+    }
+    return x + y * GRID_SIZE + z * GRID_SIZE * GRID_SIZE;
+    // return x + GRID_SIZE * (y * GRID_SIZE * z);
+}
+
+void setupTestCase()
+{
+    std::fill(voxelGrid.begin(), voxelGrid.end(), 0);
+
+    switch (currentTestCase)
+    {
+    case TestCase::TEST_SINGLE_CENTER:
+    {
+        int index = coordsToIndex(GRID_SIZE / 2, GRID_SIZE / 2, GRID_SIZE / 2);
+        if (index != -1)
+        {
+            voxelGrid[index] = 255;
+        }
+        break;
+    }
+    case TestCase::TEST_LINE_X:
+    {
+        for (int i = 0; i < GRID_SIZE; i++)
+        {
+            int index = coordsToIndex(i, GRID_SIZE / 2, GRID_SIZE / 2);
+            if (index != -1)
+            {
+                voxelGrid[index] = 255;
+            }
+        }
+        break;
+    }
+    }
 }
