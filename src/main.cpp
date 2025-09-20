@@ -62,6 +62,14 @@ int main()
         return -1;
     }
 
+#ifdef __APPLE__
+    // Set OpenGL version and profile for macOS compatibility
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE); // Required on macOS
+#endif
+
     window = glfwCreateWindow(640, 480, "", NULL, NULL); // empty window name
     glfwMakeContextCurrent(window);
 
@@ -307,8 +315,18 @@ unsigned int make_module(const std::string &filepath, unsigned int module_type)
     std::ifstream file;
     std::stringstream bufferedLines;
     std::string line;
+    std::string fullPath;
+
     // ../../../src/shaders/shader.frag
-    file.open("../../../" + filepath);
+#ifdef __APPLE__
+    // On macOS, use relative path from build directory
+    fullPath = "../" + filepath;
+#else
+    // On other platforms (Windows, Linux), use the original path
+    fullPath = "../../../" + filepath;
+#endif
+
+    file.open(fullPath);
     while (std::getline(file, line))
     {
         bufferedLines << line << "\n";
