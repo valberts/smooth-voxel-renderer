@@ -13,8 +13,27 @@ uniform vec3 cameraPos;
 uniform int neighborhoodRingSize; // 1=3x3, 2=5x5, 3=7x7
 uniform bool checkBounds;
 uniform int gridSize;
+uniform bool usePhongLighting;
+uniform bool useDistanceWeighting;
+uniform float distanceWeightMultiplier;
 
 const int MAX_NEIGHBORS = 343;
+
+// distance, fall off to 0 at neighborhood edge
+float calculateDistanceWeight(vec3 point, vec3 rayOrigin, vec3 rayDirection, int ringSize) {
+    // perpendicular distance
+    vec3 toPoint = point - rayOrigin;
+    vec3 projection = dot(toPoint, rayDirection) * rayDirection;
+    vec3 perpendicular = toPoint - projection;
+    float perpDist = length(perpendicular);
+    
+    // lower is more tight falloff, higher is more gentle
+    float maxDist = sqrt(distanceWeightMultiplier) * float(ringSize);
+    
+    // linear falloff, 1.0 at center to 0.0 at edge
+    float weight = 1.0 - (perpDist / maxDist);
+    return max(0.0, weight);
+}
 
 int getVoxelNeighborhood(ivec3 coord, int ringSize, out vec3 neighbors[MAX_NEIGHBORS]) {
     int count = 0;
@@ -55,6 +74,23 @@ vec3 calculateCentroid(vec3 neighbors[MAX_NEIGHBORS], int count) {
     return sum / float(count);
 }
 
+vec3 calculateWeightedCentroid(vec3 neighbors[MAX_NEIGHBORS], int count, vec3 rayOrigin, vec3 rayDirection, int ringSize) {
+    if (count == 0) {
+        return vec3(0.0);
+    }
+
+    vec3 weightedSum = vec3(0.0);
+    float totalWeight = 0.0;
+    
+    for (int i = 0; i < count; ++i) {
+        float weight = calculateDistanceWeight(neighbors[i], rayOrigin, rayDirection, ringSize);
+        weightedSum += neighbors[i] * weight;
+        totalWeight += weight;
+    }
+
+    return weightedSum / totalWeight;
+}
+
 mat3 calculateCovarianceMatrix (vec3 neighbors[MAX_NEIGHBORS], int count, vec3 mean) {
     if (count <= 1) {
         return mat3(0.0);
@@ -68,6 +104,26 @@ mat3 calculateCovarianceMatrix (vec3 neighbors[MAX_NEIGHBORS], int count, vec3 m
     }
 
     covariance = covariance / float(count - 1);
+
+    return covariance;
+}
+
+mat3 calculateWeightedCovarianceMatrix(vec3 neighbors[MAX_NEIGHBORS], int count, vec3 mean, vec3 rayOrigin, vec3 rayDirection, int ringSize) {
+    if (count <= 1) {
+        return mat3(0.0);
+    }
+
+    mat3 covariance = mat3(0.0);
+    float totalWeight = 0.0;
+
+    for (int i = 0; i < count; ++i) {
+        float weight = calculateDistanceWeight(neighbors[i], rayOrigin, rayDirection, ringSize);
+        vec3 diff = neighbors[i] - mean;
+        covariance += weight * outerProduct(diff, diff);
+        totalWeight += weight;
+    }
+
+    covariance = covariance / totalWeight;
 
     return covariance;
 }
@@ -183,6 +239,22 @@ bool intersectPlane(vec3 ro, vec3 rd, vec3 plane_center, vec3 plane_normal, out 
     return false;
 }
 
+vec3 calculatePhongLighting(vec3 normal, vec3 intersection_point) {
+    vec3 viewDir = normalize(cameraPos - intersection_point);
+    vec3 lightDir = viewDir; // light comes from camera
+    
+    vec3 ambient = vec3(0.2);
+    
+    float diff = max(dot(normal, lightDir), 0.0);
+    vec3 diffuse = diff * vec3(0.8);
+    
+    vec3 reflectDir = reflect(-lightDir, normal);
+    float spec = pow(max(dot(viewDir, reflectDir), 0.0), 32.0);
+    vec3 specular = 0.5 * spec * vec3(1.0);
+    
+    return ambient + diffuse + specular;
+}
+
 void main()
 {
     // ray generation
@@ -254,9 +326,16 @@ void main()
                 //     discard;
                 // }
 
-                vec3 plane_center = calculateCentroid(neighbors, neighbor_count);
+                vec3 plane_center;
+                mat3 covariance;
                 
-                mat3 covariance = calculateCovarianceMatrix(neighbors, neighbor_count, plane_center);
+                if (useDistanceWeighting) {
+                    plane_center = calculateWeightedCentroid(neighbors, neighbor_count, ro, rd, neighborhoodRingSize);
+                    covariance = calculateWeightedCovarianceMatrix(neighbors, neighbor_count, plane_center, ro, rd, neighborhoodRingSize);
+                } else {
+                    plane_center = calculateCentroid(neighbors, neighbor_count);
+                    covariance = calculateCovarianceMatrix(neighbors, neighbor_count, plane_center);
+                }
                 
                 vec3 eigenvalues;
                 mat3 eigenvectors;
@@ -283,27 +362,30 @@ void main()
                     vec3 intersection_point = ro + rd * t;
                     ivec3 voxel_coords = ivec3(floor(intersection_point));
 
-                    // phong
-
-                    // vec3 hit_view = cameraPos - intersection_point;
-                    // hit_view = normalize(hit_view);
-                    // float res = dot(hit_view, plane_normal);
-                    // res = res * res;
-                    // FragColor = vec4(res, res, res, 1.0);
-                    // return;
-
                     if (checkBounds) {
-                    if (all(equal(voxel_coords, voxel))) {
-                        plane_normal = normalize(plane_normal);
-                        hit_normal = plane_normal;
-                        FragColor = vec4(abs(hit_normal) * 0.7 + 0.3, 1.0);
-                        return;
-                    }
+                        if (all(equal(voxel_coords, voxel))) {
+                            plane_normal = normalize(plane_normal);
+                            hit_normal = plane_normal;
+                            
+                            if (usePhongLighting) {
+                                vec3 result = calculatePhongLighting(hit_normal, intersection_point);
+                                FragColor = vec4(result, 1.0);
+                            } else {
+                                FragColor = vec4(abs(hit_normal) * 0.7 + 0.3, 1.0);
+                            }
+                            return;
+                        }
                     }
                     else {
                         plane_normal = normalize(plane_normal);
                         hit_normal = plane_normal;
-                        FragColor = vec4(abs(hit_normal) * 0.7 + 0.3, 1.0);
+                        
+                        if (usePhongLighting) {
+                            vec3 result = calculatePhongLighting(hit_normal, intersection_point);
+                            FragColor = vec4(result, 1.0);
+                        } else {
+                            FragColor = vec4(abs(hit_normal) * 0.7 + 0.3, 1.0);
+                        }
                         return;
                     }
                     // if the intersection point isnt in the current voxel, we continue voxel traversal
@@ -317,7 +399,16 @@ void main()
                 } else {
                     hit_normal = vec3(0.0, 0.0, -step.z);
                 }
-                FragColor = vec4(abs(hit_normal) * 0.7 + 0.3, 1.0);
+                
+                if (usePhongLighting) {
+                    // calculate intersection point for this voxel
+                    vec3 intersection_point = ro + rd * (min(min(t_max.x, t_max.y), t_max.z) - min(min(delta_t.x, delta_t.y), delta_t.z));
+                    
+                    vec3 result = calculatePhongLighting(hit_normal, intersection_point);
+                    FragColor = vec4(result, 1.0);
+                } else {
+                    FragColor = vec4(abs(hit_normal) * 0.7 + 0.3, 1.0);
+                }
                 return;
             }
         }

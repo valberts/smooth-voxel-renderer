@@ -12,6 +12,13 @@ bool checkBounds = 1;
 int k_neighbors = 64;
 int neighborhood_ring_size = 1;
 
+// Phong lighting variables
+bool usePhongLighting = false;
+
+// Distance weighting variables
+bool useDistanceWeighting = false;
+float distanceWeightMultiplier = 3.0f;
+
 // --- camera ---
 Camera camera(glm::vec3(GRID_SIZE * 1.5f, GRID_SIZE * 1.5f, GRID_SIZE * 1.5f));
 
@@ -138,6 +145,9 @@ int main()
         glUniform1i(glGetUniformLocation(shader, "checkBounds"), checkBounds);         // 1 on, 0 off
         glUniform1i(glGetUniformLocation(shader, "neighborhoodRingSize"), neighborhood_ring_size);
         glUniform1i(glGetUniformLocation(shader, "gridSize"), GRID_SIZE);
+        glUniform1i(glGetUniformLocation(shader, "usePhongLighting"), usePhongLighting);
+        glUniform1i(glGetUniformLocation(shader, "useDistanceWeighting"), useDistanceWeighting);
+        glUniform1f(glGetUniformLocation(shader, "distanceWeightMultiplier"), distanceWeightMultiplier);
 
         // bind voxel data texture and draw
         glActiveTexture(GL_TEXTURE0);
@@ -220,7 +230,16 @@ void drawGui(float deltaTime)
                     camera.Position.x, camera.Position.y, camera.Position.z);
         ImGui::Separator();
         ImGui::Checkbox("Use Plane Fitting", &usePlaneFitting);
+        if (usePlaneFitting)
+        {
+            ImGui::Checkbox("Use Distance Weighting", &useDistanceWeighting);
+            if (useDistanceWeighting)
+            {
+                ImGui::InputFloat("Distance Weight Multiplier", &distanceWeightMultiplier, 0.1f, 1.0f, "%.2f");
+            }
+        }
         ImGui::Checkbox("Check Bounds", &checkBounds);
+        ImGui::Checkbox("Use Phong Lighting", &usePhongLighting);
 
         ImGui::Separator();
 
