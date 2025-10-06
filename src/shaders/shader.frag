@@ -16,10 +16,14 @@ uniform int gridSize;
 uniform bool usePhongLighting;
 uniform bool useDistanceWeighting;
 uniform float distanceWeightMultiplier;
+uniform bool useVoxelCentricWeighting;
+uniform float voxelCentricStepSize;
+uniform float voxelCentricEpsilon;
+uniform int voxelCentricMaxIterations;
 
 const int MAX_NEIGHBORS = 343;
 
-// distance, fall off to 0 at neighborhood edge
+// ray-centric distance weight: perpendicular distance to ray
 float calculateDistanceWeight(vec3 point, vec3 rayOrigin, vec3 rayDirection, int ringSize) {
     // perpendicular distance
     vec3 toPoint = point - rayOrigin;
@@ -32,6 +36,16 @@ float calculateDistanceWeight(vec3 point, vec3 rayOrigin, vec3 rayDirection, int
     
     // linear falloff, 1.0 at center to 0.0 at edge
     float weight = 1.0 - (perpDist / maxDist);
+    return max(0.0, weight);
+}
+
+// voxel-centric distance weight: distance from center voxel
+float calculateVoxelCentricWeight(vec3 neighborPos, vec3 currentRayPos, int ringSize) {
+    float dist = distance(neighborPos, currentRayPos);
+    float maxDist = sqrt(3.0) * float(ringSize); // diagonal of neighborhood
+    
+    // linear falloff, 1.0 at center to 0.0 at edge
+    float weight = 1.0 - (dist / maxDist);
     return max(0.0, weight);
 }
 
@@ -91,6 +105,23 @@ vec3 calculateWeightedCentroid(vec3 neighbors[MAX_NEIGHBORS], int count, vec3 ra
     return weightedSum / totalWeight;
 }
 
+vec3 calculateVoxelCentricWeightedCentroid(vec3 neighbors[MAX_NEIGHBORS], int count, vec3 currentRayPos, int ringSize) {
+    if (count == 0) {
+        return vec3(0.0);
+    }
+
+    vec3 weightedSum = vec3(0.0);
+    float totalWeight = 0.0;
+    
+    for (int i = 0; i < count; ++i) {
+        float weight = calculateVoxelCentricWeight(neighbors[i], currentRayPos, ringSize);
+        weightedSum += neighbors[i] * weight;
+        totalWeight += weight;
+    }
+    
+    return weightedSum / totalWeight;
+}
+
 mat3 calculateCovarianceMatrix (vec3 neighbors[MAX_NEIGHBORS], int count, vec3 mean) {
     if (count <= 1) {
         return mat3(0.0);
@@ -126,6 +157,24 @@ mat3 calculateWeightedCovarianceMatrix(vec3 neighbors[MAX_NEIGHBORS], int count,
     covariance = covariance / totalWeight;
 
     return covariance;
+}
+
+mat3 calculateVoxelCentricWeightedCovarianceMatrix(vec3 neighbors[MAX_NEIGHBORS], int count, vec3 mean, vec3 currentRayPos, int ringSize) {
+    if (count <= 1) {
+        return mat3(0.0);
+    }
+
+    mat3 covariance = mat3(0.0);
+    float totalWeight = 0.0;
+
+    for (int i = 0; i < count; ++i) {
+        float weight = calculateVoxelCentricWeight(neighbors[i], currentRayPos, ringSize);
+        vec3 diff = neighbors[i] - mean;
+        covariance += weight * outerProduct(diff, diff);
+        totalWeight += weight;
+    }
+
+    return covariance / totalWeight;
 }
 
 vec3 computeEigenvector(mat3 M, float eigenvalue) {
@@ -318,52 +367,155 @@ void main()
             vec3 hit_normal;
              
             if (usePlaneFitting) {
-                vec3 neighbors[MAX_NEIGHBORS];
-                int neighbor_count = getVoxelNeighborhood(voxel, neighborhoodRingSize, neighbors);
-                
-                // // not enough neighbors
-                // if (neighbor_count < 3) {
-                //     discard;
-                // }
+                if (useVoxelCentricWeighting) {
+                    // voxel-centric with iterative refinement
+                    float hit_t = min(min(t_max.x, t_max.y), t_max.z) - min(min(delta_t.x, delta_t.y), delta_t.z);
+                    vec3 current_pos = ro + rd * max(0.0, hit_t);
+                    bool found_surface = false;
+                    vec3 final_normal;
+                    vec3 final_intersection;
+                    
+                    for (int iter = 0; iter < voxelCentricMaxIterations; iter++) {
+                        ivec3 current_voxel = ivec3(floor(current_pos));
+                        
+                        // Check if still in grid
+                        if (current_voxel.x < 0 || current_voxel.x >= gridSize ||
+                            current_voxel.y < 0 || current_voxel.y >= gridSize ||
+                            current_voxel.z < 0 || current_voxel.z >= gridSize) {
+                            break;
+                        }
+                        
+                        // Check if current voxel is solid
+                        if (texelFetch(voxelData, current_voxel, 0).r <= 0.0) {
+                            // Step forward and continue
+                            current_pos += rd * voxelCentricStepSize;
+                            continue;
+                        }
+                        
+                        // Get neighborhood around current position
+                        vec3 neighbors[MAX_NEIGHBORS];
+                        int neighbor_count = getVoxelNeighborhood(current_voxel, neighborhoodRingSize, neighbors);
+                        
+                        if (neighbor_count < 3) {
+                            // Not enough neighbors, step forward
+                            current_pos += rd * voxelCentricStepSize;
+                            continue;
+                        }
+                        
+                        // Compute plane with voxel-centric weighting
+                        vec3 center_voxel_pos = vec3(current_voxel) + 0.5;
+                        vec3 plane_center = calculateVoxelCentricWeightedCentroid(neighbors, neighbor_count, current_pos, neighborhoodRingSize);
+                        mat3 covariance = calculateVoxelCentricWeightedCovarianceMatrix(neighbors, neighbor_count, plane_center, current_pos, neighborhoodRingSize);
+                        
+                        vec3 eigenvalues;
+                        mat3 eigenvectors;
+                        solveEigenSystem(covariance, eigenvalues, eigenvectors);
+                        
+                        int smallest_eigenvalue = 0;
+                        if (eigenvalues[1] < eigenvalues[smallest_eigenvalue]) {
+                            smallest_eigenvalue = 1;
+                        }
+                        if (eigenvalues[2] < eigenvalues[smallest_eigenvalue]) {
+                            smallest_eigenvalue = 2;
+                        }
+                        vec3 plane_normal = eigenvectors[smallest_eigenvalue];
+                        
+                        // Orient normal toward camera
+                        vec3 view_direction = normalize(ro - center_voxel_pos);
+                        if (dot(plane_normal, view_direction) < 0.0) {
+                            plane_normal = -plane_normal;
+                        }
+                        
+                        // Intersect with plane
+                        float plane_t;
+                        bool plane_hit = intersectPlane(ro, rd, plane_center, plane_normal, plane_t);
+                        
+                        if (plane_hit && plane_t > 0.0) {
+                            vec3 intersection_point = ro + rd * plane_t;
+                            
+                            // Check if intersection is within epsilon
+                            vec3 diff = intersection_point - current_pos;
+                            float dist = length(diff);
 
-                vec3 plane_center;
-                mat3 covariance;
-                
-                if (useDistanceWeighting) {
-                    plane_center = calculateWeightedCentroid(neighbors, neighbor_count, ro, rd, neighborhoodRingSize);
-                    covariance = calculateWeightedCovarianceMatrix(neighbors, neighbor_count, plane_center, ro, rd, neighborhoodRingSize);
+                            
+                            if (dist < voxelCentricEpsilon) {
+                                found_surface = true;
+                                final_normal = normalize(plane_normal);
+                                final_intersection = intersection_point;
+                                break;
+                            }
+                        }
+                        
+                        // Step forward along ray
+                        current_pos += rd * voxelCentricStepSize;
+                    }
+                    
+                    if (found_surface) {
+                        if (usePhongLighting) {
+                            vec3 result = calculatePhongLighting(final_normal, final_intersection);
+                            FragColor = vec4(result, 1.0);
+                        } else {
+                            FragColor = vec4(abs(final_normal) * 0.7 + 0.3, 1.0);
+                        }
+                        return;
+                    }
+                    
                 } else {
-                    plane_center = calculateCentroid(neighbors, neighbor_count);
-                    covariance = calculateCovarianceMatrix(neighbors, neighbor_count, plane_center);
-                }
-                
-                vec3 eigenvalues;
-                mat3 eigenvectors;
-                solveEigenSystem(covariance, eigenvalues, eigenvectors);
+                    // ray-centric mode
+                    vec3 neighbors[MAX_NEIGHBORS];
+                    int neighbor_count = getVoxelNeighborhood(voxel, neighborhoodRingSize, neighbors);
+                    
+                    vec3 plane_center;
+                    mat3 covariance;
+                    
+                    if (useDistanceWeighting) {
+                        plane_center = calculateWeightedCentroid(neighbors, neighbor_count, ro, rd, neighborhoodRingSize);
+                        covariance = calculateWeightedCovarianceMatrix(neighbors, neighbor_count, plane_center, ro, rd, neighborhoodRingSize);
+                    } else {
+                        plane_center = calculateCentroid(neighbors, neighbor_count);
+                        covariance = calculateCovarianceMatrix(neighbors, neighbor_count, plane_center);
+                    }
+                    
+                    vec3 eigenvalues;
+                    mat3 eigenvectors;
+                    solveEigenSystem(covariance, eigenvalues, eigenvectors);
 
-                int smallest_eigenvalue = 0;
-                if (eigenvalues[1] < eigenvalues[smallest_eigenvalue]) {
-                    smallest_eigenvalue = 1;
-                }
-                if (eigenvalues[2] < eigenvalues[smallest_eigenvalue]) {
-                    smallest_eigenvalue = 2;
-                }
-                vec3 plane_normal = eigenvectors[smallest_eigenvalue];
-                
-                vec3 view_direction = normalize(ro - (vec3(voxel) + 0.5));
-                if (dot(plane_normal, view_direction) < 0.0) {
-                    plane_normal = -plane_normal;
-                }
-                
-                float t;
-                bool hit = intersectPlane(ro, rd, plane_center, plane_normal, t);
-                
-                if (hit) {
-                    vec3 intersection_point = ro + rd * t;
-                    ivec3 voxel_coords = ivec3(floor(intersection_point));
+                    int smallest_eigenvalue = 0;
+                    if (eigenvalues[1] < eigenvalues[smallest_eigenvalue]) {
+                        smallest_eigenvalue = 1;
+                    }
+                    if (eigenvalues[2] < eigenvalues[smallest_eigenvalue]) {
+                        smallest_eigenvalue = 2;
+                    }
+                    vec3 plane_normal = eigenvectors[smallest_eigenvalue];
+                    
+                    vec3 view_direction = normalize(ro - (vec3(voxel) + 0.5));
+                    if (dot(plane_normal, view_direction) < 0.0) {
+                        plane_normal = -plane_normal;
+                    }
+                    
+                    float t_plane;
+                    bool hit = intersectPlane(ro, rd, plane_center, plane_normal, t_plane);
+                    
+                    if (hit) {
+                        vec3 intersection_point = ro + rd * t_plane;
+                        ivec3 voxel_coords = ivec3(floor(intersection_point));
 
-                    if (checkBounds) {
-                        if (all(equal(voxel_coords, voxel))) {
+                        if (checkBounds) {
+                            if (all(equal(voxel_coords, voxel))) {
+                                plane_normal = normalize(plane_normal);
+                                hit_normal = plane_normal;
+                                
+                                if (usePhongLighting) {
+                                    vec3 result = calculatePhongLighting(hit_normal, intersection_point);
+                                    FragColor = vec4(result, 1.0);
+                                } else {
+                                    FragColor = vec4(abs(hit_normal) * 0.7 + 0.3, 1.0);
+                                }
+                                return;
+                            }
+                        }
+                        else {
                             plane_normal = normalize(plane_normal);
                             hit_normal = plane_normal;
                             
@@ -375,20 +527,8 @@ void main()
                             }
                             return;
                         }
+                        // if the intersection point isnt in the current voxel, we continue voxel traversal
                     }
-                    else {
-                        plane_normal = normalize(plane_normal);
-                        hit_normal = plane_normal;
-                        
-                        if (usePhongLighting) {
-                            vec3 result = calculatePhongLighting(hit_normal, intersection_point);
-                            FragColor = vec4(result, 1.0);
-                        } else {
-                            FragColor = vec4(abs(hit_normal) * 0.7 + 0.3, 1.0);
-                        }
-                        return;
-                    }
-                    // if the intersection point isnt in the current voxel, we continue voxel traversal
                 }
 
             } else {

@@ -3,7 +3,7 @@
 // --- globals ---
 unsigned int VAO, VBO;
 int GRID_SIZE = 64;
-std::vector<unsigned char> voxelGrid(GRID_SIZE *GRID_SIZE *GRID_SIZE, 0);
+std::vector<unsigned char> voxelGrid(GRID_SIZE * GRID_SIZE * GRID_SIZE, 0);
 unsigned int voxelTexture;
 unsigned int sdfCentersTexture;
 unsigned int sdfNormalsTexture;
@@ -18,6 +18,12 @@ bool usePhongLighting = false;
 // Distance weighting variables
 bool useDistanceWeighting = false;
 float distanceWeightMultiplier = 3.0f;
+
+// Voxel-centric weighting variables
+bool useVoxelCentricWeighting = false;
+float voxelCentricStepSize = 0.05f;
+float voxelCentricEpsilon = 0.05f;
+int voxelCentricMaxIterations = 16;
 
 // --- camera ---
 Camera camera(glm::vec3(GRID_SIZE * 1.5f, GRID_SIZE * 1.5f, GRID_SIZE * 1.5f));
@@ -148,6 +154,10 @@ int main()
         glUniform1i(glGetUniformLocation(shader, "usePhongLighting"), usePhongLighting);
         glUniform1i(glGetUniformLocation(shader, "useDistanceWeighting"), useDistanceWeighting);
         glUniform1f(glGetUniformLocation(shader, "distanceWeightMultiplier"), distanceWeightMultiplier);
+        glUniform1i(glGetUniformLocation(shader, "useVoxelCentricWeighting"), useVoxelCentricWeighting);
+        glUniform1f(glGetUniformLocation(shader, "voxelCentricStepSize"), voxelCentricStepSize);
+        glUniform1f(glGetUniformLocation(shader, "voxelCentricEpsilon"), voxelCentricEpsilon);
+        glUniform1i(glGetUniformLocation(shader, "voxelCentricMaxIterations"), voxelCentricMaxIterations);
 
         // bind voxel data texture and draw
         glActiveTexture(GL_TEXTURE0);
@@ -232,10 +242,18 @@ void drawGui(float deltaTime)
         ImGui::Checkbox("Use Plane Fitting", &usePlaneFitting);
         if (usePlaneFitting)
         {
-            ImGui::Checkbox("Use Distance Weighting", &useDistanceWeighting);
+            ImGui::Checkbox("Use Ray-Centric Weighting", &useDistanceWeighting);
             if (useDistanceWeighting)
             {
                 ImGui::InputFloat("Distance Weight Multiplier", &distanceWeightMultiplier, 0.1f, 1.0f, "%.2f");
+            }
+
+            ImGui::Checkbox("Use Voxel-Centric Weighting", &useVoxelCentricWeighting);
+            if (useVoxelCentricWeighting)
+            {
+                ImGui::InputFloat("Step Size", &voxelCentricStepSize, 0.01f, 0.1f, "%.3f");
+                ImGui::InputFloat("Epsilon", &voxelCentricEpsilon, 0.05f, 0.5f, "%.2f");
+                ImGui::InputInt("Max Iterations", &voxelCentricMaxIterations, 1, 10);
             }
         }
         ImGui::Checkbox("Check Bounds", &checkBounds);
