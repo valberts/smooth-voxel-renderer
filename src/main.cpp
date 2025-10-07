@@ -25,6 +25,11 @@ float voxelCentricStepSize = 0.05f;
 float voxelCentricEpsilon = 0.05f;
 int voxelCentricMaxIterations = 16;
 
+// spherical neighborhood
+bool useSphericalNeighborhood = false;
+float sphericalRadius = 1.5f;
+bool useVoxelCenterForSphere = true;
+
 // --- camera ---
 Camera camera(glm::vec3(GRID_SIZE * 1.5f, GRID_SIZE * 1.5f, GRID_SIZE * 1.5f));
 
@@ -147,8 +152,8 @@ int main()
         glUniformMatrix4fv(glGetUniformLocation(shader, "invProjection"), 1, GL_FALSE, glm::value_ptr(invProjection));
         glUniformMatrix4fv(glGetUniformLocation(shader, "invView"), 1, GL_FALSE, glm::value_ptr(invView));
         glUniform3fv(glGetUniformLocation(shader, "cameraPos"), 1, glm::value_ptr(camera.Position));
-        glUniform1i(glGetUniformLocation(shader, "usePlaneFitting"), usePlaneFitting); // 1 on, 0 off
-        glUniform1i(glGetUniformLocation(shader, "checkBounds"), checkBounds);         // 1 on, 0 off
+        glUniform1i(glGetUniformLocation(shader, "usePlaneFitting"), usePlaneFitting);
+        glUniform1i(glGetUniformLocation(shader, "checkBounds"), checkBounds);
         glUniform1i(glGetUniformLocation(shader, "neighborhoodRingSize"), neighborhood_ring_size);
         glUniform1i(glGetUniformLocation(shader, "gridSize"), GRID_SIZE);
         glUniform1i(glGetUniformLocation(shader, "usePhongLighting"), usePhongLighting);
@@ -158,6 +163,9 @@ int main()
         glUniform1f(glGetUniformLocation(shader, "voxelCentricStepSize"), voxelCentricStepSize);
         glUniform1f(glGetUniformLocation(shader, "voxelCentricEpsilon"), voxelCentricEpsilon);
         glUniform1i(glGetUniformLocation(shader, "voxelCentricMaxIterations"), voxelCentricMaxIterations);
+        glUniform1i(glGetUniformLocation(shader, "useSphericalNeighborhood"), useSphericalNeighborhood);
+        glUniform1f(glGetUniformLocation(shader, "sphericalRadius"), sphericalRadius);
+        glUniform1i(glGetUniformLocation(shader, "useVoxelCenterForSphere"), useVoxelCenterForSphere);
 
         // bind voxel data texture and draw
         glActiveTexture(GL_TEXTURE0);
@@ -321,10 +329,19 @@ void drawGui(float deltaTime)
 
         ImGui::Separator();
 
-        // --- Neighborhood Ring Size Slider ---
-        // Creates a slider from 1 (3x3x3) to 3 (7x7x7).
-        // This doesn't need to re-run the CPU pre-computation, so it's very fast.
-        ImGui::SliderInt("Ring Size", &neighborhood_ring_size, 1, 3);
+        ImGui::Checkbox("Use Spherical Neighborhood", &useSphericalNeighborhood);
+        if (useSphericalNeighborhood)
+        {
+            ImGui::SliderFloat("Radius", &sphericalRadius, 1.5f, 3.5f);
+            ImGui::Checkbox("Use Voxel Center Distance", &useVoxelCenterForSphere);
+        }
+        else
+        {
+            // --- Neighborhood Ring Size Slider ---
+            // Creates a slider from 1 (3x3x3) to 3 (7x7x7).
+            // This doesn't need to re-run the CPU pre-computation, so it's very fast.
+            ImGui::SliderInt("Ring Size", &neighborhood_ring_size, 1, 3);
+        }
         ImGui::End();
     }
 

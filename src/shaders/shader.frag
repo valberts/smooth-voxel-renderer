@@ -20,6 +20,9 @@ uniform bool useVoxelCentricWeighting;
 uniform float voxelCentricStepSize;
 uniform float voxelCentricEpsilon;
 uniform int voxelCentricMaxIterations;
+uniform int useSphericalNeighborhood;
+uniform float sphericalRadius;
+uniform bool useVoxelCenterForSphere;
 
 const int MAX_NEIGHBORS = 343;
 
@@ -68,6 +71,45 @@ int getVoxelNeighborhood(ivec3 coord, int ringSize, out vec3 neighbors[MAX_NEIGH
 
                 if (is_solid > 0.0) {
                     neighbors[count] = vec3(neighbor_coord) + 0.5;
+                    count++;
+                }
+            }
+        }
+    }
+    return count;
+}
+
+int getSphericalNeighborhood(vec3 point, float radius, out vec3 neighbors[MAX_NEIGHBORS]) {
+    int count = 0;
+    ivec3 center_coord = ivec3(floor(point));
+    int maxOffset = int(ceil(radius));
+    
+    for (int z = -maxOffset; z <= maxOffset; ++z) {
+        for (int y = -maxOffset; y <= maxOffset; ++y) {
+            for (int x = -maxOffset; x <= maxOffset; ++x) {
+                if (count >= MAX_NEIGHBORS) break;
+                
+                ivec3 neighbor_coord = center_coord + ivec3(x, y, z);
+                
+                // Bounds check
+                if (neighbor_coord.x < 0 || neighbor_coord.x >= gridSize ||
+                    neighbor_coord.y < 0 || neighbor_coord.y >= gridSize ||
+                    neighbor_coord.z < 0 || neighbor_coord.z >= gridSize) {
+                    continue;
+                }
+                
+                // Check if solid
+                float is_solid = texelFetch(voxelData, neighbor_coord, 0).r;
+                if (is_solid <= 0.0) {
+                    continue;
+                }
+                
+                // Check distance from center point to voxel center
+                vec3 voxel_center = vec3(neighbor_coord) + 0.5;
+                float dist = distance(point, voxel_center);
+                
+                if (dist <= radius) {
+                    neighbors[count] = voxel_center;
                     count++;
                 }
             }
@@ -394,7 +436,13 @@ void main()
                         
                         // Get neighborhood around current position
                         vec3 neighbors[MAX_NEIGHBORS];
-                        int neighbor_count = getVoxelNeighborhood(current_voxel, neighborhoodRingSize, neighbors);
+                        int neighbor_count;
+                        
+                        if (useSphericalNeighborhood == 1) {
+                            neighbor_count = getSphericalNeighborhood(current_pos, sphericalRadius, neighbors);
+                        } else {
+                            neighbor_count = getVoxelNeighborhood(current_voxel, neighborhoodRingSize, neighbors);
+                        }
                         
                         if (neighbor_count < 3) {
                             // Not enough neighbors, step forward
@@ -404,8 +452,10 @@ void main()
                         
                         // Compute plane with voxel-centric weighting
                         vec3 center_voxel_pos = vec3(current_voxel) + 0.5;
-                        vec3 plane_center = calculateVoxelCentricWeightedCentroid(neighbors, neighbor_count, current_pos, neighborhoodRingSize);
-                        mat3 covariance = calculateVoxelCentricWeightedCovarianceMatrix(neighbors, neighbor_count, plane_center, current_pos, neighborhoodRingSize);
+                        float effectiveRingSize = (useSphericalNeighborhood == 1) ? sphericalRadius : float(neighborhoodRingSize);
+                        int ringSize = int(effectiveRingSize);
+                        vec3 plane_center = calculateVoxelCentricWeightedCentroid(neighbors, neighbor_count, current_pos, ringSize);
+                        mat3 covariance = calculateVoxelCentricWeightedCovarianceMatrix(neighbors, neighbor_count, plane_center, current_pos, ringSize);
                         
                         vec3 eigenvalues;
                         mat3 eigenvectors;
@@ -463,14 +513,30 @@ void main()
                 } else {
                     // ray-centric mode
                     vec3 neighbors[MAX_NEIGHBORS];
-                    int neighbor_count = getVoxelNeighborhood(voxel, neighborhoodRingSize, neighbors);
+                    int neighbor_count;
+                    
+                    if (useSphericalNeighborhood == 1) {
+                        vec3 sample_point;
+                        if (useVoxelCenterForSphere) {
+                            sample_point = vec3(voxel) + 0.5;
+                        } else {
+                            float hit_t = min(min(t_max.x, t_max.y), t_max.z) - min(min(delta_t.x, delta_t.y), delta_t.z);
+                            sample_point = ro + rd * hit_t;
+                        }
+                        neighbor_count = getSphericalNeighborhood(sample_point, sphericalRadius, neighbors);
+                    } else {
+                        neighbor_count = getVoxelNeighborhood(voxel, neighborhoodRingSize, neighbors);
+                    }
                     
                     vec3 plane_center;
                     mat3 covariance;
                     
                     if (useDistanceWeighting) {
-                        plane_center = calculateWeightedCentroid(neighbors, neighbor_count, ro, rd, neighborhoodRingSize);
-                        covariance = calculateWeightedCovarianceMatrix(neighbors, neighbor_count, plane_center, ro, rd, neighborhoodRingSize);
+                        // Use sphericalRadius for weighting if spherical neighborhoods are enabled
+                        float effectiveRingSize = (useSphericalNeighborhood == 1) ? sphericalRadius : float(neighborhoodRingSize);
+                        int ringSize = int(effectiveRingSize);
+                        plane_center = calculateWeightedCentroid(neighbors, neighbor_count, ro, rd, ringSize);
+                        covariance = calculateWeightedCovarianceMatrix(neighbors, neighbor_count, plane_center, ro, rd, ringSize);
                     } else {
                         plane_center = calculateCentroid(neighbors, neighbor_count);
                         covariance = calculateCovarianceMatrix(neighbors, neighbor_count, plane_center);
