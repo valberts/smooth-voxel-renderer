@@ -18,6 +18,7 @@ bool usePhongLighting = false;
 // Distance weighting variables
 bool useDistanceWeighting = false;
 float distanceWeightMultiplier = 3.0f;
+int falloffMode = 0; // 0 = linear, 1 = gaussian
 
 // Voxel-centric weighting variables
 bool useVoxelCentricWeighting = false;
@@ -159,6 +160,7 @@ int main()
         glUniform1i(glGetUniformLocation(shader, "usePhongLighting"), usePhongLighting);
         glUniform1i(glGetUniformLocation(shader, "useDistanceWeighting"), useDistanceWeighting);
         glUniform1f(glGetUniformLocation(shader, "distanceWeightMultiplier"), distanceWeightMultiplier);
+        glUniform1i(glGetUniformLocation(shader, "falloffMode"), falloffMode);
         glUniform1i(glGetUniformLocation(shader, "useVoxelCentricWeighting"), useVoxelCentricWeighting);
         glUniform1f(glGetUniformLocation(shader, "voxelCentricStepSize"), voxelCentricStepSize);
         glUniform1f(glGetUniformLocation(shader, "voxelCentricEpsilon"), voxelCentricEpsilon);
@@ -262,6 +264,12 @@ void drawGui(float deltaTime)
                 ImGui::InputFloat("Step Size", &voxelCentricStepSize, 0.01f, 0.1f, "%.3f");
                 ImGui::InputFloat("Epsilon", &voxelCentricEpsilon, 0.05f, 0.5f, "%.2f");
                 ImGui::InputInt("Max Iterations", &voxelCentricMaxIterations, 1, 10);
+            }
+
+            if (useDistanceWeighting || useVoxelCentricWeighting)
+            {
+                const char *falloffItems[] = {"Linear", "Gaussian"};
+                ImGui::Combo("Falloff Mode", &falloffMode, falloffItems, IM_ARRAYSIZE(falloffItems));
             }
         }
         ImGui::Checkbox("Check Bounds", &checkBounds);

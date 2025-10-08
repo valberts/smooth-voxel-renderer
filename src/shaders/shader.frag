@@ -23,11 +23,54 @@ uniform int voxelCentricMaxIterations;
 uniform int useSphericalNeighborhood;
 uniform float sphericalRadius;
 uniform bool useVoxelCenterForSphere;
+uniform int falloffMode; // 0 = linear, 1 = gaussian
 
 const int MAX_NEIGHBORS = 343;
 
+// seperable 1D gaussian: G(x) = exp(-x^2 / (2*sigma^2))
+float gaussian1D(float offset, float sigma) {
+    return exp(-(offset * offset) / (2.0 * sigma * sigma));
+}
+
+// 3D gaussian convolution weight using separable kernels
+// weight = G(dx) * G(dy) * G(dz)
+float gaussianConvolutionWeight(vec3 offset, float sigma) {
+    return gaussian1D(offset.x, sigma) * gaussian1D(offset.y, sigma) * gaussian1D(offset.z, sigma);
+}
+
+// gaussian weight: using perpendicular distance approximation
+float calculateGaussianDistanceWeight(vec3 point, vec3 rayOrigin, vec3 rayDirection, int ringSize) {
+    // perpendicular distance
+    vec3 toPoint = point - rayOrigin;
+    vec3 projection = dot(toPoint, rayDirection) * rayDirection;
+    vec3 perpendicular = toPoint - projection;
+    
+    // linear falloff has maxDist = sqrt(distanceWeightMultiplier) * ringSize
+    // for Gaussian, we set sigma = maxDist / 2.5 so that at maxDist, weight ≈ 0.01
+    float maxDist = sqrt(distanceWeightMultiplier) * float(ringSize);
+    float sigma = maxDist / 2.5; // 2.5*sigma, gaussian ≈ 0.01
+    
+    return gaussianConvolutionWeight(perpendicular, sigma);
+}
+
+// gaussian weight: voxel-centric using 3D convolution
+float calculateGaussianVoxelCentricWeight(vec3 neighborPos, vec3 currentRayPos, int ringSize) {
+    vec3 offset = neighborPos - currentRayPos;
+    
+    float maxDist = sqrt(3.0) * float(ringSize);
+    float sigma = maxDist / 2.5; // 2.5*sigma, gaussian ≈ 0.01
+    
+    // 3d gaussian convolution: G(x,y,z) = G(x) * G(y) * G(z)
+    return gaussianConvolutionWeight(offset, sigma);
+}
+
 // ray-centric distance weight: perpendicular distance to ray
 float calculateDistanceWeight(vec3 point, vec3 rayOrigin, vec3 rayDirection, int ringSize) {
+    if (falloffMode == 1) { // gaussian
+        return calculateGaussianDistanceWeight(point, rayOrigin, rayDirection, ringSize);
+    }
+    
+    // linear falloff (falloffMode == 0)
     // perpendicular distance
     vec3 toPoint = point - rayOrigin;
     vec3 projection = dot(toPoint, rayDirection) * rayDirection;
@@ -44,6 +87,11 @@ float calculateDistanceWeight(vec3 point, vec3 rayOrigin, vec3 rayDirection, int
 
 // voxel-centric distance weight: distance from center voxel
 float calculateVoxelCentricWeight(vec3 neighborPos, vec3 currentRayPos, int ringSize) {
+    if (falloffMode == 1) { // gaussian
+        return calculateGaussianVoxelCentricWeight(neighborPos, currentRayPos, ringSize);
+    }
+    
+    // Linear falloff (falloffMode == 0)
     float dist = distance(neighborPos, currentRayPos);
     float maxDist = sqrt(3.0) * float(ringSize); // diagonal of neighborhood
     
