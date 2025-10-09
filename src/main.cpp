@@ -2,6 +2,8 @@
 
 // --- globals ---
 unsigned int VAO, VBO;
+unsigned int wireframeVAO, wireframeVBO;
+int wireframeVertexCount = 0;
 int GRID_SIZE = 64;
 std::vector<unsigned char> voxelGrid(GRID_SIZE * GRID_SIZE * GRID_SIZE, 0);
 unsigned int voxelTexture;
@@ -12,6 +14,13 @@ bool checkBounds = 1;
 int k_neighbors = 64;
 int neighborhood_ring_size = 1;
 
+// debug wireframe
+bool showDebugWireframe = false;
+bool wireframeUseFading = true;
+float wireframeFadeStart = 5.0f;
+float wireframeFadeEnd = 20.0f;
+glm::vec3 wireframeColor(1.0f, 1.0f, 1.0f);
+
 // Phong lighting variables
 bool usePhongLighting = false;
 
@@ -19,6 +28,9 @@ bool usePhongLighting = false;
 bool useDistanceWeighting = false;
 float distanceWeightMultiplier = 3.0f;
 int falloffMode = 0; // 0 = linear, 1 = gaussian
+
+// Surface type
+int surfaceType = 0; // 0 = plane, 1 = sphere
 
 // Voxel-centric weighting variables
 bool useVoxelCentricWeighting = false;
@@ -50,6 +62,8 @@ void setupSdfTextures(const std::vector<float> &centerData, const std::vector<fl
 void drawGui(float deltaTime);
 void setupTestCase();
 int coordsToIndex(int x, int y, int z);
+void setupWireframeGeometry();
+void updateWireframeGeometry();
 
 // --- shape ---
 enum ShapeType
@@ -119,11 +133,13 @@ int main()
     ImGui_ImplOpenGL3_Init("#version 330");
 
     unsigned int shader = make_shader("src/shaders/shader.vert", "src/shaders/shader.frag");
+    unsigned int wireframeShader = make_shader("src/shaders/wireframe.vert", "src/shaders/wireframe.frag");
 
     setupVoxelGrid();
     // precomputeSdf();
     setupVoxelTexture();
     setupQuad();
+    setupWireframeGeometry();
 
     // --- rendering ---
     while (!glfwWindowShouldClose(window))
@@ -135,7 +151,8 @@ int main()
         processInput(window);
 
         glfwPollEvents();
-        glClear(GL_COLOR_BUFFER_BIT);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
         glUseProgram(shader);
 
         int width, height;
@@ -150,6 +167,8 @@ int main()
         glm::mat4 invView = glm::inverse(view);
 
         // Send uniforms to the shader
+        glUniformMatrix4fv(glGetUniformLocation(shader, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
+        glUniformMatrix4fv(glGetUniformLocation(shader, "view"), 1, GL_FALSE, glm::value_ptr(view));
         glUniformMatrix4fv(glGetUniformLocation(shader, "invProjection"), 1, GL_FALSE, glm::value_ptr(invProjection));
         glUniformMatrix4fv(glGetUniformLocation(shader, "invView"), 1, GL_FALSE, glm::value_ptr(invView));
         glUniform3fv(glGetUniformLocation(shader, "cameraPos"), 1, glm::value_ptr(camera.Position));
@@ -161,6 +180,7 @@ int main()
         glUniform1i(glGetUniformLocation(shader, "useDistanceWeighting"), useDistanceWeighting);
         glUniform1f(glGetUniformLocation(shader, "distanceWeightMultiplier"), distanceWeightMultiplier);
         glUniform1i(glGetUniformLocation(shader, "falloffMode"), falloffMode);
+        glUniform1i(glGetUniformLocation(shader, "surfaceType"), surfaceType);
         glUniform1i(glGetUniformLocation(shader, "useVoxelCentricWeighting"), useVoxelCentricWeighting);
         glUniform1f(glGetUniformLocation(shader, "voxelCentricStepSize"), voxelCentricStepSize);
         glUniform1f(glGetUniformLocation(shader, "voxelCentricEpsilon"), voxelCentricEpsilon);
@@ -185,6 +205,35 @@ int main()
         glBindVertexArray(VAO);
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
+        // render wireframe overlay
+        if (showDebugWireframe && wireframeVertexCount > 0)
+        {
+            glUseProgram(wireframeShader);
+
+            // disable depth testing
+            glDisable(GL_DEPTH_TEST);
+
+            // alpha blending for transparency
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+            glUniformMatrix4fv(glGetUniformLocation(wireframeShader, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
+            glUniformMatrix4fv(glGetUniformLocation(wireframeShader, "view"), 1, GL_FALSE, glm::value_ptr(view));
+            glUniform3fv(glGetUniformLocation(wireframeShader, "cameraPos"), 1, glm::value_ptr(camera.Position));
+
+            glUniform3fv(glGetUniformLocation(wireframeShader, "wireframeColor"), 1, glm::value_ptr(wireframeColor));
+            glUniform1i(glGetUniformLocation(wireframeShader, "useFading"), wireframeUseFading);
+            glUniform1f(glGetUniformLocation(wireframeShader, "fadeStart"), wireframeFadeStart);
+            glUniform1f(glGetUniformLocation(wireframeShader, "fadeEnd"), wireframeFadeEnd);
+
+            glBindVertexArray(wireframeVAO);
+            glDrawArrays(GL_LINES, 0, wireframeVertexCount);
+
+            glDisable(GL_BLEND);
+        }
+
+        glDisable(GL_DEPTH_TEST);
+
         drawGui(deltaTime);
 
         glfwSwapBuffers(window);
@@ -196,7 +245,10 @@ int main()
     ImGui::DestroyContext();
     glDeleteVertexArrays(1, &VAO);
     glDeleteBuffers(1, &VBO);
+    glDeleteVertexArrays(1, &wireframeVAO);
+    glDeleteBuffers(1, &wireframeVBO);
     glDeleteProgram(shader);
+    glDeleteProgram(wireframeShader);
     glfwTerminate();
     return 0;
 }
@@ -252,6 +304,13 @@ void drawGui(float deltaTime)
         ImGui::Checkbox("Use Plane Fitting", &usePlaneFitting);
         if (usePlaneFitting)
         {
+            // Surface type dropdown (only show when weighting is disabled for now)
+            if (!useDistanceWeighting && !useVoxelCentricWeighting)
+            {
+                const char *surfaceItems[] = {"Plane", "Sphere"};
+                ImGui::Combo("Surface Type", &surfaceType, surfaceItems, IM_ARRAYSIZE(surfaceItems));
+            }
+
             ImGui::Checkbox("Use Ray-Centric Weighting", &useDistanceWeighting);
             if (useDistanceWeighting)
             {
@@ -345,11 +404,12 @@ void drawGui(float deltaTime)
         }
         else
         {
-            // --- Neighborhood Ring Size Slider ---
-            // Creates a slider from 1 (3x3x3) to 3 (7x7x7).
-            // This doesn't need to re-run the CPU pre-computation, so it's very fast.
             ImGui::SliderInt("Ring Size", &neighborhood_ring_size, 1, 3);
         }
+
+        ImGui::Separator();
+        ImGui::Checkbox("Show Debug Wireframe", &showDebugWireframe);
+
         ImGui::End();
     }
 
@@ -587,6 +647,11 @@ void setupVoxelGrid()
     }
 
     setupVoxelTexture();
+
+    if (wireframeVAO != 0)
+    {
+        updateWireframeGeometry();
+    }
 }
 
 void setupVoxelTexture()
@@ -892,4 +957,73 @@ void setupTestCase()
         break;
     }
     }
+}
+
+void setupWireframeGeometry()
+{
+    // Initialize the VAO and VBO for wireframes
+    glGenVertexArrays(1, &wireframeVAO);
+    glGenBuffers(1, &wireframeVBO);
+
+    glBindVertexArray(wireframeVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, wireframeVBO);
+
+    // Set up the vertex attribute pointer (position only)
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *)0);
+    glEnableVertexAttribArray(0);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+
+    // Generate initial wireframe geometry
+    updateWireframeGeometry();
+}
+
+void updateWireframeGeometry()
+{
+    std::vector<float> wireframeVertices;
+
+    // For each voxel that is solid, add the edges of its cube
+    for (int z = 0; z < GRID_SIZE; ++z)
+    {
+        for (int y = 0; y < GRID_SIZE; ++y)
+        {
+            for (int x = 0; x < GRID_SIZE; ++x)
+            {
+                int idx = coordsToIndex(x, y, z);
+                if (voxelGrid[idx] > 0)
+                {
+                    // Define the 8 corners of the voxel cube
+                    float x0 = (float)x, x1 = (float)(x + 1);
+                    float y0 = (float)y, y1 = (float)(y + 1);
+                    float z0 = (float)z, z1 = (float)(z + 1);
+
+                    // 12 edges of a cube (each edge needs 2 vertices)
+                    // Bottom face (z0)
+                    wireframeVertices.insert(wireframeVertices.end(), {x0, y0, z0, x1, y0, z0}); // edge 0
+                    wireframeVertices.insert(wireframeVertices.end(), {x1, y0, z0, x1, y1, z0}); // edge 1
+                    wireframeVertices.insert(wireframeVertices.end(), {x1, y1, z0, x0, y1, z0}); // edge 2
+                    wireframeVertices.insert(wireframeVertices.end(), {x0, y1, z0, x0, y0, z0}); // edge 3
+
+                    // Top face (z1)
+                    wireframeVertices.insert(wireframeVertices.end(), {x0, y0, z1, x1, y0, z1}); // edge 4
+                    wireframeVertices.insert(wireframeVertices.end(), {x1, y0, z1, x1, y1, z1}); // edge 5
+                    wireframeVertices.insert(wireframeVertices.end(), {x1, y1, z1, x0, y1, z1}); // edge 6
+                    wireframeVertices.insert(wireframeVertices.end(), {x0, y1, z1, x0, y0, z1}); // edge 7
+
+                    // Vertical edges connecting bottom and top faces
+                    wireframeVertices.insert(wireframeVertices.end(), {x0, y0, z0, x0, y0, z1}); // edge 8
+                    wireframeVertices.insert(wireframeVertices.end(), {x1, y0, z0, x1, y0, z1}); // edge 9
+                    wireframeVertices.insert(wireframeVertices.end(), {x1, y1, z0, x1, y1, z1}); // edge 10
+                    wireframeVertices.insert(wireframeVertices.end(), {x0, y1, z0, x0, y1, z1}); // edge 11
+                }
+            }
+        }
+    }
+
+    wireframeVertexCount = wireframeVertices.size() / 3;
+
+    glBindBuffer(GL_ARRAY_BUFFER, wireframeVBO);
+    glBufferData(GL_ARRAY_BUFFER, wireframeVertices.size() * sizeof(float), wireframeVertices.data(), GL_STATIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
 }

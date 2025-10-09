@@ -9,6 +9,8 @@ uniform sampler3D sdfNormals;
 uniform bool usePlaneFitting;
 uniform mat4 invProjection;
 uniform mat4 invView;
+uniform mat4 projection;
+uniform mat4 view;
 uniform vec3 cameraPos;
 uniform int neighborhoodRingSize; // 1=3x3, 2=5x5, 3=7x7
 uniform bool checkBounds;
@@ -24,6 +26,7 @@ uniform int useSphericalNeighborhood;
 uniform float sphericalRadius;
 uniform bool useVoxelCenterForSphere;
 uniform int falloffMode; // 0 = linear, 1 = gaussian
+uniform int surfaceType; // 0 = plane, 1 = sphere
 
 const int MAX_NEIGHBORS = 343;
 
@@ -394,6 +397,12 @@ vec3 calculatePhongLighting(vec3 normal, vec3 intersection_point) {
     return ambient + diffuse + specular;
 }
 
+void setFragmentDepth(vec3 worldPos) {
+    vec4 clipPos = projection * view * vec4(worldPos, 1.0);
+    float ndcDepth = clipPos.z / clipPos.w;
+    gl_FragDepth = (ndcDepth + 1.0) * 0.5;
+}
+
 void main()
 {
     // ray generation
@@ -549,6 +558,7 @@ void main()
                     }
                     
                     if (found_surface) {
+                        setFragmentDepth(final_intersection);
                         if (usePhongLighting) {
                             vec3 result = calculatePhongLighting(final_normal, final_intersection);
                             FragColor = vec4(result, 1.0);
@@ -620,6 +630,7 @@ void main()
                                 plane_normal = normalize(plane_normal);
                                 hit_normal = plane_normal;
                                 
+                                setFragmentDepth(intersection_point);
                                 if (usePhongLighting) {
                                     vec3 result = calculatePhongLighting(hit_normal, intersection_point);
                                     FragColor = vec4(result, 1.0);
@@ -633,6 +644,7 @@ void main()
                             plane_normal = normalize(plane_normal);
                             hit_normal = plane_normal;
                             
+                            setFragmentDepth(intersection_point);
                             if (usePhongLighting) {
                                 vec3 result = calculatePhongLighting(hit_normal, intersection_point);
                                 FragColor = vec4(result, 1.0);
@@ -654,10 +666,11 @@ void main()
                     hit_normal = vec3(0.0, 0.0, -step.z);
                 }
                 
+                // calculate intersection point for this voxel
+                vec3 intersection_point = ro + rd * (min(min(t_max.x, t_max.y), t_max.z) - min(min(delta_t.x, delta_t.y), delta_t.z));
+                setFragmentDepth(intersection_point);
+                
                 if (usePhongLighting) {
-                    // calculate intersection point for this voxel
-                    vec3 intersection_point = ro + rd * (min(min(t_max.x, t_max.y), t_max.z) - min(min(delta_t.x, delta_t.y), delta_t.z));
-                    
                     vec3 result = calculatePhongLighting(hit_normal, intersection_point);
                     FragColor = vec4(result, 1.0);
                 } else {
