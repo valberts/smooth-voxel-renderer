@@ -9,7 +9,7 @@ std::vector<unsigned char> voxelGrid(GRID_SIZE * GRID_SIZE * GRID_SIZE, 0);
 unsigned int voxelTexture;
 unsigned int sdfCentersTexture;
 unsigned int sdfNormalsTexture;
-bool usePlaneFitting = 1;
+bool useFitting = 1;
 bool checkBounds = 1;
 int k_neighbors = 64;
 int neighborhood_ring_size = 1;
@@ -71,7 +71,8 @@ enum ShapeType
     SHAPE_SPHERE,
     SHAPE_STAIRCASE_1_1,
     SHAPE_STAIRCASE_2_1,
-    SHAPE_CUBE
+    SHAPE_CUBE,
+    SHAPE_CONCAVE
 };
 ShapeType currentShape = SHAPE_SPHERE;
 
@@ -172,7 +173,7 @@ int main()
         glUniformMatrix4fv(glGetUniformLocation(shader, "invProjection"), 1, GL_FALSE, glm::value_ptr(invProjection));
         glUniformMatrix4fv(glGetUniformLocation(shader, "invView"), 1, GL_FALSE, glm::value_ptr(invView));
         glUniform3fv(glGetUniformLocation(shader, "cameraPos"), 1, glm::value_ptr(camera.Position));
-        glUniform1i(glGetUniformLocation(shader, "usePlaneFitting"), usePlaneFitting);
+        glUniform1i(glGetUniformLocation(shader, "useFitting"), useFitting);
         glUniform1i(glGetUniformLocation(shader, "checkBounds"), checkBounds);
         glUniform1i(glGetUniformLocation(shader, "neighborhoodRingSize"), neighborhood_ring_size);
         glUniform1i(glGetUniformLocation(shader, "gridSize"), GRID_SIZE);
@@ -301,15 +302,11 @@ void drawGui(float deltaTime)
         ImGui::Text("Camera Position: (%.1f, %.1f, %.1f)",
                     camera.Position.x, camera.Position.y, camera.Position.z);
         ImGui::Separator();
-        ImGui::Checkbox("Use Plane Fitting", &usePlaneFitting);
-        if (usePlaneFitting)
+        ImGui::Checkbox("Use Fitting", &useFitting);
+        if (useFitting)
         {
-            // Surface type dropdown (only show when weighting is disabled for now)
-            if (!useDistanceWeighting && !useVoxelCentricWeighting)
-            {
-                const char *surfaceItems[] = {"Plane", "Sphere"};
-                ImGui::Combo("Surface Type", &surfaceType, surfaceItems, IM_ARRAYSIZE(surfaceItems));
-            }
+            const char *surfaceItems[] = {"Plane", "Sphere"};
+            ImGui::Combo("Surface Type", &surfaceType, surfaceItems, IM_ARRAYSIZE(surfaceItems));
 
             ImGui::Checkbox("Use Ray-Centric Weighting", &useDistanceWeighting);
             if (useDistanceWeighting)
@@ -343,7 +340,8 @@ void drawGui(float deltaTime)
                 "Sphere",
                 "Staircase (1:1)",
                 "Staircase (2:1)",
-                "Cube"};
+                "Cube",
+                "Concave"};
             int current_item_index = static_cast<int>(currentShape);
 
             if (ImGui::Combo("Shape", &current_item_index, items, IM_ARRAYSIZE(items)))
@@ -408,7 +406,7 @@ void drawGui(float deltaTime)
         }
 
         ImGui::Separator();
-        ImGui::Checkbox("Show Debug Wireframe", &showDebugWireframe);
+        ImGui::Checkbox("Show Wireframe", &showDebugWireframe);
 
         ImGui::End();
     }
@@ -604,6 +602,28 @@ void generateCube(int thickness = 1)
     }
 }
 
+void generateConcave()
+{
+    int min_coord = GRID_SIZE / 12;
+    int max_coord = GRID_SIZE * 3 / 12;
+
+    for (int x = min_coord; x <= max_coord; ++x)
+        for (int y = min_coord; y <= max_coord; ++y)
+            for (int z = min_coord; z <= max_coord; ++z)
+            {
+                // 1 voxel thick shell
+                bool onShell = (x == min_coord || x == max_coord ||
+                                y == min_coord || y == max_coord ||
+                                z == min_coord);
+
+                // Skip one face, e.g. the +Z face
+                bool skipFace = (z == max_coord);
+
+                if (onShell && !skipFace)
+                    voxelGrid[x + y * GRID_SIZE + z * GRID_SIZE * GRID_SIZE] = 255;
+            }
+}
+
 void setupVoxelGrid()
 {
     // Set grid size based on test mode
@@ -643,6 +663,9 @@ void setupVoxelGrid()
         case SHAPE_CUBE:
             generateCube();
             break;
+        case SHAPE_CONCAVE:
+            generateConcave();
+            break;
         }
     }
 
@@ -659,7 +682,6 @@ void setupVoxelTexture()
     glGenTextures(1, &voxelTexture);
     glBindTexture(GL_TEXTURE_3D, voxelTexture);
 
-    // Set texture parameters. GL_NEAREST is crucial for blocky look.
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
     glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_BORDER);
@@ -671,142 +693,6 @@ void setupVoxelTexture()
     // Upload the voxel data. We use GL_RED because we only have one channel (on/off).
     glTexImage3D(GL_TEXTURE_3D, 0, GL_RED, GRID_SIZE, GRID_SIZE, GRID_SIZE, 0,
                  GL_RED, GL_UNSIGNED_BYTE, voxelGrid.data());
-}
-
-void precomputeSdf()
-{
-    std::cout << "Starting surface reconstruction pre-computation..." << std::endl;
-    std::vector<glm::vec3> pointCloud = createPointCloudFromVoxelGrid(voxelGrid, GRID_SIZE);
-    std::cout << "Step 1: Point cloud created with " << pointCloud.size() << " points." << std::endl;
-
-    if (!pointCloud.empty())
-    {
-        int testPointIndex = 0; // Start by assuming the first point is the one
-        // find point with largest x coordinate
-        for (int i = 1; i < pointCloud.size(); ++i)
-        {
-            if (pointCloud[i].x > pointCloud[testPointIndex].x)
-            {
-                testPointIndex = i;
-            }
-        }
-        std::cout << "Found a test point on the far +X surface." << std::endl;
-        std::vector<int> neighbors = findKNearestNeighbors(pointCloud, testPointIndex, k_neighbors);
-
-        std::cout << "Step 2: Found " << k_neighbors << " nearest neighbors for point "
-                  << testPointIndex << " ("
-                  << pointCloud[testPointIndex].x << ", "
-                  << pointCloud[testPointIndex].y << ", "
-                  << pointCloud[testPointIndex].z << "):" << std::endl;
-
-        for (int neighborIndex : neighbors)
-        {
-            const auto &point = pointCloud[neighborIndex];
-            std::cout << "  - Point " << neighborIndex << " at ("
-                      << point.x << ", " << point.y << ", " << point.z << ")" << std::endl;
-        }
-
-        glm::vec3 centroid = calculateCentroid(pointCloud, neighbors);
-        std::cout << "  - Calculated Centroid: ("
-                  << centroid.x << ", " << centroid.y << ", " << centroid.z << ")" << std::endl;
-
-        glm::mat3 covariance = calculateCovarianceMatrix(pointCloud, neighbors, centroid);
-        std::cout << "Step 3: Calculated Covariance Matrix:" << std::endl;
-        std::cout << "  [" << covariance[0][0] << ", " << covariance[1][0] << ", " << covariance[2][0] << "]" << std::endl;
-        std::cout << "  [" << covariance[0][1] << ", " << covariance[1][1] << ", " << covariance[2][1] << "]" << std::endl;
-        std::cout << "  [" << covariance[0][2] << ", " << covariance[1][2] << ", " << covariance[2][2] << "]" << std::endl;
-
-        glm::mat3 eigenvectors;
-        glm::vec3 eigenvalues;
-        findEigenvectors(covariance, eigenvectors, eigenvalues);
-
-        std::cout << "Step 4: Eigendecomposition Results:" << std::endl;
-        std::cout << "  - Eigenvalue 0: " << eigenvalues[0] << ", Eigenvector: (" << eigenvectors[0].x << ", " << eigenvectors[0].y << ", " << eigenvectors[0].z << ")" << std::endl;
-        std::cout << "  - Eigenvalue 1: " << eigenvalues[1] << ", Eigenvector: (" << eigenvectors[1].x << ", " << eigenvectors[1].y << ", " << eigenvectors[1].z << ")" << std::endl;
-        std::cout << "  - Eigenvalue 2: " << eigenvalues[2] << ", Eigenvector: (" << eigenvectors[2].x << ", " << eigenvectors[2].y << ", " << eigenvectors[2].z << ")" << std::endl;
-
-        int smallestIdx = 0;
-        if (eigenvalues[1] < eigenvalues[smallestIdx])
-            smallestIdx = 1;
-        if (eigenvalues[2] < eigenvalues[smallestIdx])
-            smallestIdx = 2;
-        std::cout << "  -> Smallest Eigenvalue is at index " << smallestIdx << ". The normal will be Eigenvector " << smallestIdx << "." << std::endl;
-
-        std::cout << "\n--- Calculating Tangent Plane for Point " << testPointIndex << " ---" << std::endl;
-        TangentPlane plane = calculateTangentPlaneForPoint(pointCloud, testPointIndex, k_neighbors);
-
-        std::cout << "Result -> Centroid: (" << plane.center.x << ", " << plane.center.y << ", " << plane.center.z << ")" << std::endl;
-        std::cout << "Result -> Normal:   (" << plane.normal.x << ", " << plane.normal.y << ", " << plane.normal.z << ")" << std::endl;
-        std::vector<TangentPlane> unorientedPlanes = calculateTangentPlanes(pointCloud, k_neighbors);
-        std::cout << "Stage 1 Complete: Calculated " << unorientedPlanes.size() << " unoriented tangent planes." << std::endl;
-
-        std::cout << "\n--- Starting Stage 2: Consistent Tangent Plane Orientation ---" << std::endl;
-        RiemannianGraph graph = buildRiemannianGraph(unorientedPlanes, k_neighbors);
-        std::cout << "Stage 2 Part 1: Riemannian Graph created." << std::endl;
-        std::cout << "  - Nodes: " << graph.numNodes << std::endl;
-        std::cout << "  - Edges: " << graph.edges.size() << std::endl;
-
-        std::vector<GraphEdge> mst = calculateMinimumSpanningTree(graph);
-        std::cout << "Stage 2 Part 2: Minimum Spanning Tree (MST) calculated." << std::endl;
-        std::cout << "  - MST contains " << mst.size() << " edges." << std::endl;
-
-        orientTangentPlanes(unorientedPlanes, mst);
-        std::vector<TangentPlane> &orientedPlanes = unorientedPlanes;
-        std::cout << "Stage 2 Part 3: Orientation propagation complete." << std::endl;
-        testPointIndex = 0;
-        for (int i = 1; i < pointCloud.size(); ++i)
-        {
-            if (pointCloud[i].x > pointCloud[testPointIndex].x)
-            {
-                testPointIndex = i;
-            }
-        }
-        std::cout << "\n--- Verifying Orientation ---" << std::endl;
-        std::cout << "Test point on +X surface (index " << testPointIndex << ")." << std::endl;
-        std::cout << "Normal AFTER orientation: ("
-                  << orientedPlanes[testPointIndex].normal.x << ", "
-                  << orientedPlanes[testPointIndex].normal.y << ", "
-                  << orientedPlanes[testPointIndex].normal.z << ")" << std::endl;
-
-        std::cout << "\n--- Starting Stage 3: SDF Data Generation ---" << std::endl;
-        std::vector<float> centerData, normalData;
-        createSdf(orientedPlanes, pointCloud, GRID_SIZE, centerData, normalData);
-
-        setupSdfTextures(centerData, normalData);
-
-        std::cout << "\n--- All CPU pre-computation is complete! ---" << std::endl;
-    }
-}
-
-void setupSdfTextures(const std::vector<float> &centerData, const std::vector<float> &normalData)
-{
-    glGenTextures(1, &sdfCentersTexture);
-    glBindTexture(GL_TEXTURE_3D, sdfCentersTexture);
-
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_BORDER);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-    glTexImage3D(GL_TEXTURE_3D, 0, GL_RGB32F, GRID_SIZE, GRID_SIZE, GRID_SIZE, 0,
-                 GL_RGB, GL_FLOAT, centerData.data());
-
-    std::cout << "SDF centers texture created and uploaded." << std::endl;
-
-    glGenTextures(1, &sdfNormalsTexture);
-    glBindTexture(GL_TEXTURE_3D, sdfNormalsTexture);
-
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_BORDER);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-    glTexImage3D(GL_TEXTURE_3D, 0, GL_RGB32F, GRID_SIZE, GRID_SIZE, GRID_SIZE, 0,
-                 GL_RGB, GL_FLOAT, normalData.data());
-
-    std::cout << "SDF normals texture created and uploaded." << std::endl;
 }
 
 // Convert 3D coordinates to 1D index in the voxel grid

@@ -4,9 +4,7 @@
 out vec4 FragColor;
 
 uniform sampler3D voxelData;
-uniform sampler3D sdfCenters;
-uniform sampler3D sdfNormals;
-uniform bool usePlaneFitting;
+uniform bool useFitting;
 uniform mat4 invProjection;
 uniform mat4 invView;
 uniform mat4 projection;
@@ -30,19 +28,22 @@ uniform int surfaceType; // 0 = plane, 1 = sphere
 
 const int MAX_NEIGHBORS = 343;
 
+// Global arrays to avoid register pressure from multiple large local arrays
+vec3 g_neighbors[MAX_NEIGHBORS];
+float g_weights[MAX_NEIGHBORS];
+
 // seperable 1D gaussian: G(x) = exp(-x^2 / (2*sigma^2))
-float gaussian1D(float offset, float sigma) {
+float computeGaussian1D(float offset, float sigma) {
     return exp(-(offset * offset) / (2.0 * sigma * sigma));
 }
 
 // 3D gaussian convolution weight using separable kernels
 // weight = G(dx) * G(dy) * G(dz)
-float gaussianConvolutionWeight(vec3 offset, float sigma) {
-    return gaussian1D(offset.x, sigma) * gaussian1D(offset.y, sigma) * gaussian1D(offset.z, sigma);
+float computeGaussianConvolutionWeight(vec3 offset, float sigma) {
+    return computeGaussian1D(offset.x, sigma) * computeGaussian1D(offset.y, sigma) * computeGaussian1D(offset.z, sigma);
 }
 
-// gaussian weight: using perpendicular distance approximation
-float calculateGaussianDistanceWeight(vec3 point, vec3 rayOrigin, vec3 rayDirection, int ringSize) {
+float computeGaussianDistanceFalloff(vec3 point, vec3 rayOrigin, vec3 rayDirection, int ringSize) {
     // perpendicular distance
     vec3 toPoint = point - rayOrigin;
     vec3 projection = dot(toPoint, rayDirection) * rayDirection;
@@ -53,24 +54,23 @@ float calculateGaussianDistanceWeight(vec3 point, vec3 rayOrigin, vec3 rayDirect
     float maxDist = sqrt(distanceWeightMultiplier) * float(ringSize);
     float sigma = maxDist / 2.5; // 2.5*sigma, gaussian ≈ 0.01
     
-    return gaussianConvolutionWeight(perpendicular, sigma);
+    return computeGaussianConvolutionWeight(perpendicular, sigma);
 }
 
-// gaussian weight: voxel-centric using 3D convolution
-float calculateGaussianVoxelCentricWeight(vec3 neighborPos, vec3 currentRayPos, int ringSize) {
+float computeGaussianVoxelCentricFalloff(vec3 neighborPos, vec3 currentRayPos, int ringSize) {
     vec3 offset = neighborPos - currentRayPos;
     
     float maxDist = sqrt(3.0) * float(ringSize);
     float sigma = maxDist / 2.5; // 2.5*sigma, gaussian ≈ 0.01
     
     // 3d gaussian convolution: G(x,y,z) = G(x) * G(y) * G(z)
-    return gaussianConvolutionWeight(offset, sigma);
+    return computeGaussianConvolutionWeight(offset, sigma);
 }
 
 // ray-centric distance weight: perpendicular distance to ray
-float calculateDistanceWeight(vec3 point, vec3 rayOrigin, vec3 rayDirection, int ringSize) {
+float computeDistanceWeight(vec3 point, vec3 rayOrigin, vec3 rayDirection, int ringSize) {
     if (falloffMode == 1) { // gaussian
-        return calculateGaussianDistanceWeight(point, rayOrigin, rayDirection, ringSize);
+        return computeGaussianDistanceFalloff(point, rayOrigin, rayDirection, ringSize);
     }
     
     // linear falloff (falloffMode == 0)
@@ -89,9 +89,9 @@ float calculateDistanceWeight(vec3 point, vec3 rayOrigin, vec3 rayDirection, int
 }
 
 // voxel-centric distance weight: distance from center voxel
-float calculateVoxelCentricWeight(vec3 neighborPos, vec3 currentRayPos, int ringSize) {
+float computeVoxelCentricWeight(vec3 neighborPos, vec3 currentRayPos, int ringSize) {
     if (falloffMode == 1) { // gaussian
-        return calculateGaussianVoxelCentricWeight(neighborPos, currentRayPos, ringSize);
+        return computeGaussianVoxelCentricFalloff(neighborPos, currentRayPos, ringSize);
     }
     
     // Linear falloff (falloffMode == 0)
@@ -103,7 +103,7 @@ float calculateVoxelCentricWeight(vec3 neighborPos, vec3 currentRayPos, int ring
     return max(0.0, weight);
 }
 
-int getVoxelNeighborhood(ivec3 coord, int ringSize, out vec3 neighbors[MAX_NEIGHBORS]) {
+int getNeighborsVoxel(ivec3 coord, int ringSize, out vec3 neighbors[MAX_NEIGHBORS]) {
     int count = 0;
     for (int z = -ringSize; z <= ringSize; ++z) {
         for (int y = -ringSize; y <= ringSize; ++y) {
@@ -130,7 +130,7 @@ int getVoxelNeighborhood(ivec3 coord, int ringSize, out vec3 neighbors[MAX_NEIGH
     return count;
 }
 
-int getSphericalNeighborhood(vec3 point, float radius, out vec3 neighbors[MAX_NEIGHBORS]) {
+int getNeighborsSpherical(vec3 point, float radius, out vec3 neighbors[MAX_NEIGHBORS]) {
     int count = 0;
     ivec3 center_coord = ivec3(floor(point));
     int maxOffset = int(ceil(radius));
@@ -169,7 +169,7 @@ int getSphericalNeighborhood(vec3 point, float radius, out vec3 neighbors[MAX_NE
     return count;
 }
 
-vec3 calculateCentroid(vec3 neighbors[MAX_NEIGHBORS], int count) {
+vec3 computeCentroid(vec3 neighbors[MAX_NEIGHBORS], int count) {
     if (count == 0) {
         return vec3(0.0);
     }
@@ -181,7 +181,7 @@ vec3 calculateCentroid(vec3 neighbors[MAX_NEIGHBORS], int count) {
     return sum / float(count);
 }
 
-vec3 calculateWeightedCentroid(vec3 neighbors[MAX_NEIGHBORS], int count, vec3 rayOrigin, vec3 rayDirection, int ringSize) {
+vec3 computeWeightedCentroid(vec3 neighbors[MAX_NEIGHBORS], int count, vec3 rayOrigin, vec3 rayDirection, int ringSize) {
     if (count == 0) {
         return vec3(0.0);
     }
@@ -190,7 +190,7 @@ vec3 calculateWeightedCentroid(vec3 neighbors[MAX_NEIGHBORS], int count, vec3 ra
     float totalWeight = 0.0;
     
     for (int i = 0; i < count; ++i) {
-        float weight = calculateDistanceWeight(neighbors[i], rayOrigin, rayDirection, ringSize);
+        float weight = computeDistanceWeight(neighbors[i], rayOrigin, rayDirection, ringSize);
         weightedSum += neighbors[i] * weight;
         totalWeight += weight;
     }
@@ -198,7 +198,7 @@ vec3 calculateWeightedCentroid(vec3 neighbors[MAX_NEIGHBORS], int count, vec3 ra
     return weightedSum / totalWeight;
 }
 
-vec3 calculateVoxelCentricWeightedCentroid(vec3 neighbors[MAX_NEIGHBORS], int count, vec3 currentRayPos, int ringSize) {
+vec3 computeVoxelCentricWeightedCentroid(vec3 neighbors[MAX_NEIGHBORS], int count, vec3 currentRayPos, int ringSize) {
     if (count == 0) {
         return vec3(0.0);
     }
@@ -207,7 +207,7 @@ vec3 calculateVoxelCentricWeightedCentroid(vec3 neighbors[MAX_NEIGHBORS], int co
     float totalWeight = 0.0;
     
     for (int i = 0; i < count; ++i) {
-        float weight = calculateVoxelCentricWeight(neighbors[i], currentRayPos, ringSize);
+        float weight = computeVoxelCentricWeight(neighbors[i], currentRayPos, ringSize);
         weightedSum += neighbors[i] * weight;
         totalWeight += weight;
     }
@@ -215,7 +215,7 @@ vec3 calculateVoxelCentricWeightedCentroid(vec3 neighbors[MAX_NEIGHBORS], int co
     return weightedSum / totalWeight;
 }
 
-mat3 calculateCovarianceMatrix (vec3 neighbors[MAX_NEIGHBORS], int count, vec3 mean) {
+mat3 computeCovarianceMatrix(vec3 neighbors[MAX_NEIGHBORS], int count, vec3 mean) {
     if (count <= 1) {
         return mat3(0.0);
     }
@@ -232,7 +232,7 @@ mat3 calculateCovarianceMatrix (vec3 neighbors[MAX_NEIGHBORS], int count, vec3 m
     return covariance;
 }
 
-mat3 calculateWeightedCovarianceMatrix(vec3 neighbors[MAX_NEIGHBORS], int count, vec3 mean, vec3 rayOrigin, vec3 rayDirection, int ringSize) {
+mat3 computeWeightedCovarianceMatrix(vec3 neighbors[MAX_NEIGHBORS], int count, vec3 mean, vec3 rayOrigin, vec3 rayDirection, int ringSize) {
     if (count <= 1) {
         return mat3(0.0);
     }
@@ -241,7 +241,7 @@ mat3 calculateWeightedCovarianceMatrix(vec3 neighbors[MAX_NEIGHBORS], int count,
     float totalWeight = 0.0;
 
     for (int i = 0; i < count; ++i) {
-        float weight = calculateDistanceWeight(neighbors[i], rayOrigin, rayDirection, ringSize);
+        float weight = computeDistanceWeight(neighbors[i], rayOrigin, rayDirection, ringSize);
         vec3 diff = neighbors[i] - mean;
         covariance += weight * outerProduct(diff, diff);
         totalWeight += weight;
@@ -252,21 +252,16 @@ mat3 calculateWeightedCovarianceMatrix(vec3 neighbors[MAX_NEIGHBORS], int count,
     return covariance;
 }
 
-mat3 calculateVoxelCentricWeightedCovarianceMatrix(vec3 neighbors[MAX_NEIGHBORS], int count, vec3 mean, vec3 currentRayPos, int ringSize) {
-    if (count <= 1) {
-        return mat3(0.0);
-    }
-
+mat3 computeVoxelCentricWeightedCovarianceMatrix(vec3 neighbors[MAX_NEIGHBORS], int count, vec3 mean, vec3 currentRayPos, int ringSize) {
+    if (count <= 1) return mat3(0.0);
     mat3 covariance = mat3(0.0);
     float totalWeight = 0.0;
-
     for (int i = 0; i < count; ++i) {
-        float weight = calculateVoxelCentricWeight(neighbors[i], currentRayPos, ringSize);
+        float weight = computeVoxelCentricWeight(neighbors[i], currentRayPos, ringSize);
         vec3 diff = neighbors[i] - mean;
         covariance += weight * outerProduct(diff, diff);
         totalWeight += weight;
     }
-
     return covariance / totalWeight;
 }
 
@@ -357,19 +352,131 @@ float ray_aabb(const in vec3 ro, const in vec3 rd, const in vec3 grid_min, const
     return 1e30; // miss
 }
 
-float map(vec3 p) {
-    ivec3 voxel_coord = ivec3(floor(p));
-    vec3 center = texelFetch(sdfCenters, voxel_coord, 0).rgb;
-    vec3 normal = texelFetch(sdfNormals, voxel_coord, 0).rgb;
-
-    if (length(normal) < 0.1) {
-        vec3 voxel_center = vec3(voxel_coord) + 0.5;
-        return max(0.5, distance(p, voxel_center));
+// https://lucidar.me/en/mathematics/least-squares-fitting-of-sphere/
+// Returns vec4(center.xyz, radius)
+// Weighted version - each point contributes according to its weight
+vec4 fitSphere(vec3 neighbors[MAX_NEIGHBORS], float weights[MAX_NEIGHBORS], int N) {
+    // STEP 1: Check we have enough points
+    if (N < 4) {
+        return vec4(0.0, 0.0, 0.0, -1.0);
     }
-
-    return dot(p - center, normal);
+    
+    // STEP 2: Initialize matrices
+    mat4 ATA = mat4(0.0);
+    vec4 ATB = vec4(0.0);
+    
+    // STEP 3: Accumulate A^T·A and A^T·B with weights
+    for (int i = 0; i < N; ++i) {
+        vec3 p = neighbors[i];
+        float weight = weights[i];
+        
+        // Row of A: [x, y, z, 1]
+        float x = p.x;
+        float y = p.y;
+        float z = p.z;
+        float w = 1.0;
+        
+        // Element of B: x² + y² + z²
+        float b_i = x*x + y*y + z*z;
+        
+        // Build A^T·A (symmetric 4x4) with weights
+        ATA[0][0] += weight * x * x;  // Σwi·xi²
+        ATA[0][1] += weight * x * y;  // Σwi·xi·yi
+        ATA[0][2] += weight * x * z;  // Σwi·xi·zi
+        ATA[0][3] += weight * x * w;  // Σwi·xi
+        
+        ATA[1][0] += weight * y * x;  // Σwi·yi·xi (symmetric)
+        ATA[1][1] += weight * y * y;  // Σwi·yi²
+        ATA[1][2] += weight * y * z;  // Σwi·yi·zi
+        ATA[1][3] += weight * y * w;  // Σwi·yi
+        
+        ATA[2][0] += weight * z * x;  // Σwi·zi·xi
+        ATA[2][1] += weight * z * y;  // Σwi·zi·yi
+        ATA[2][2] += weight * z * z;  // Σwi·zi²
+        ATA[2][3] += weight * z * w;  // Σwi·zi
+        
+        ATA[3][0] += weight * w * x;  // Σwi·xi
+        ATA[3][1] += weight * w * y;  // Σwi·yi
+        ATA[3][2] += weight * w * z;  // Σwi·zi
+        ATA[3][3] += weight * w * w;  // Σwi
+        
+        // Build A^T·B with weights
+        ATB.x += weight * x * b_i;  // Σwi·xi·(xi²+yi²+zi²)
+        ATB.y += weight * y * b_i;  // Σwi·yi·(xi²+yi²+zi²)
+        ATB.z += weight * z * b_i;  // Σwi·zi·(xi²+yi²+zi²)
+        ATB.w += weight * w * b_i;  // Σwi·(xi²+yi²+zi²)
+    }
+    
+    // STEP 4: Solve X = (A^T·A)^-1·(A^T·B)
+    vec4 X = inverse(ATA) * ATB;
+    
+    // X = [a, b, c, d]
+    float a = X.x;  // = 2xc
+    float b = X.y;  // = 2yc
+    float c = X.z;  // = 2zc
+    float d = X.w;  // = r² - xc² - yc² - zc²
+    
+    // STEP 5: Extract center
+    vec3 center;
+    center.x = a * 0.5;  // xc = a/2
+    center.y = b * 0.5;  // yc = b/2
+    center.z = c * 0.5;  // zc = c/2
+    
+    // STEP 6: Calculate radius
+    // r² = (4d + a² + b² + c²) / 4
+    float r_squared = (4.0 * d + a*a + b*b + c*c) * 0.25;
+    
+    // Alternative (same result):
+    // float r_squared = (4.0 * d + a*a + b*b + c*c) * 0.5 * 0.5;
+    
+    if (r_squared <= 0.0) {
+        return vec4(center, -1.0);  // Invalid
+    }
+    
+    float radius = sqrt(r_squared);
+    
+    return vec4(center, radius);
 }
 
+// https://www.scratchapixel.com/lessons/3d-basic-rendering/minimal-ray-tracer-rendering-simple-shapes/ray-sphere-intersection.html
+bool intersectSphere(vec3 ro, vec3 rd, vec3 center, float radius, out float t) {
+    vec3 L = ro - center;
+    float a = dot(rd, rd);
+    float b = 2.0 * dot(rd, L);
+    float c = dot(L, L) - radius * radius;
+    
+    float discriminant = b * b - 4.0 * a * c;
+    
+    if (discriminant < 0.0) {
+        return false;
+    }
+    
+    float sqrtDisc = sqrt(discriminant);
+    float q = (b > 0.0) ? 
+        -0.5 * (b + sqrtDisc) : 
+        -0.5 * (b - sqrtDisc);
+    
+    float t0 = q / a;
+    float t1 = c / q;
+    
+    if (t0 > t1) {
+        float temp = t0;
+        t0 = t1;
+        t1 = temp;
+    }
+    
+    if (t0 > 0.0) {
+        t = t0;
+        return true;
+    } else if (t1 > 0.0) {
+        t = t1;
+        return true;
+    }
+    
+    return false;
+}
+
+// https://www.scratchapixel.com/lessons/3d-basic-rendering/minimal-ray-tracer-rendering-simple-shapes/ray-plane-and-ray-disk-intersection.html
 bool intersectPlane(vec3 ro, vec3 rd, vec3 plane_center, vec3 plane_normal, out float t) {
     float denom = dot(plane_normal, rd);
     if (abs(denom) > 1e-6) { 
@@ -403,19 +510,337 @@ void setFragmentDepth(vec3 worldPos) {
     gl_FragDepth = (ndcDepth + 1.0) * 0.5;
 }
 
+// Extract smallest eigenvalue index from eigenvalues vector
+int findSmallestEigenvalueIndex(vec3 eigenvalues) {
+    int smallest = 0;
+    if (eigenvalues[1] < eigenvalues[smallest]) {
+        smallest = 1;
+    }
+    if (eigenvalues[2] < eigenvalues[smallest]) {
+        smallest = 2;
+    }
+    return smallest;
+}
+
+// Render final surface with optional lighting
+void renderSurface(vec3 normal, vec3 intersection_point) {
+    setFragmentDepth(intersection_point);
+    if (usePhongLighting) {
+        vec3 result = calculatePhongLighting(normal, intersection_point);
+        FragColor = vec4(result, 1.0);
+    } else {
+        FragColor = vec4(abs(normal) * 0.7 + 0.3, 1.0);
+    }
+}
+
+// Fit plane to neighbors using PCA (weighted or unweighted)
+vec3 computePlaneNormal(vec3 neighbors[MAX_NEIGHBORS], int neighborCount, vec3 rayOrigin, vec3 rayDir, vec3 referencePoint) {
+    vec3 planeCenter;
+    mat3 covariance;
+    
+    if (useDistanceWeighting) {
+        // Weighted: neighbors closer to ray have more influence
+        float effectiveRingSize = (useSphericalNeighborhood == 1) ? sphericalRadius : float(neighborhoodRingSize);
+        int ringSize = int(effectiveRingSize);
+        planeCenter = computeWeightedCentroid(neighbors, neighborCount, rayOrigin, rayDir, ringSize);
+        covariance = computeWeightedCovarianceMatrix(neighbors, neighborCount, planeCenter, rayOrigin, rayDir, ringSize);
+    } else {
+        // Unweighted: all neighbors contribute equally (standard PCA plane fitting)
+        planeCenter = computeCentroid(neighbors, neighborCount);
+        covariance = computeCovarianceMatrix(neighbors, neighborCount, planeCenter);
+    }
+    
+    vec3 eigenvalues;
+    mat3 eigenvectors;
+    solveEigenSystem(covariance, eigenvalues, eigenvectors);
+    
+    int smallest = findSmallestEigenvalueIndex(eigenvalues);
+    vec3 planeNormal = eigenvectors[smallest];
+    
+    // Orient normal toward camera
+    vec3 viewDirection = normalize(rayOrigin - referencePoint);
+    if (dot(planeNormal, viewDirection) < 0.0) {
+        planeNormal = -planeNormal;
+    }
+    
+    return normalize(planeNormal);
+}
+
+// Fit plane with voxel-centric weighting
+void computePlaneVoxelCentric(vec3 neighbors[MAX_NEIGHBORS], int neighborCount, vec3 currentPos, vec3 rayOrigin, vec3 referencePoint, out vec3 planeCenter, out vec3 planeNormal) {
+    float effectiveRingSize = (useSphericalNeighborhood == 1) ? sphericalRadius : float(neighborhoodRingSize);
+    int ringSize = int(effectiveRingSize);
+    
+    planeCenter = computeVoxelCentricWeightedCentroid(neighbors, neighborCount, currentPos, ringSize);
+    mat3 covariance = computeVoxelCentricWeightedCovarianceMatrix(neighbors, neighborCount, planeCenter, currentPos, ringSize);
+    
+    vec3 eigenvalues;
+    mat3 eigenvectors;
+    solveEigenSystem(covariance, eigenvalues, eigenvectors);
+    
+    int smallest = findSmallestEigenvalueIndex(eigenvalues);
+    planeNormal = eigenvectors[smallest];
+    
+    // Orient normal toward camera
+    vec3 viewDirection = normalize(rayOrigin - referencePoint);
+    if (dot(planeNormal, viewDirection) < 0.0) {
+        planeNormal = -planeNormal;
+    }
+}
+
+// Initialize DDA traversal parameters
+void initDDA(vec3 rayOrigin, vec3 rayDir, float t, vec3 startPos, out ivec3 voxel, out vec3 deltaT, out ivec3 step, out vec3 tMax) {
+    voxel = ivec3(floor(startPos));
+    deltaT = abs(1.0 / rayDir);
+    step = ivec3(sign(rayDir));
+    
+    // If starting outside grid, clamp to grid boundaries
+    voxel = clamp(voxel, ivec3(0), ivec3(gridSize - 1));
+    
+    for (int i = 0; i < 3; ++i) {
+        if (step[i] > 0) {
+            tMax[i] = t + (float(voxel[i] + 1) - startPos[i]) * deltaT[i];
+        } else {
+            tMax[i] = t + (startPos[i] - float(voxel[i])) * deltaT[i];
+        }
+        
+        // Handle case where we're outside the grid
+        if (startPos[i] < 0.0 && step[i] > 0) {
+            tMax[i] = t + (1.0 - startPos[i]) * deltaT[i];
+        } else if (startPos[i] >= float(gridSize) && step[i] < 0) {
+            tMax[i] = t + (startPos[i] - float(gridSize - 1)) * deltaT[i];
+        }
+    }
+}
+
+// Check if voxel is within grid bounds
+bool isInBounds(ivec3 voxel) {
+    return voxel.x >= 0 && voxel.x < gridSize &&
+           voxel.y >= 0 && voxel.y < gridSize &&
+           voxel.z >= 0 && voxel.z < gridSize;
+}
+
+// Get sample point for spherical neighborhood
+vec3 findSamplePoint(ivec3 voxel, vec3 rayOrigin, vec3 rayDir, vec3 tMax, vec3 deltaT) {
+    if (useVoxelCenterForSphere) {
+        return vec3(voxel) + 0.5;
+    } else {
+        float hitT = min(min(tMax.x, tMax.y), tMax.z) - min(min(deltaT.x, deltaT.y), deltaT.z);
+        return rayOrigin + rayDir * hitT;
+    }
+}
+
+// Calculate basic voxel normal from DDA traversal direction
+vec3 getVoxelNormal(vec3 tMax, vec3 deltaT, ivec3 step) {
+    if (tMax.x - deltaT.x > tMax.y - deltaT.y && tMax.x - deltaT.x > tMax.z - deltaT.z) {
+        return vec3(-step.x, 0.0, 0.0);
+    } else if (tMax.y - deltaT.y > tMax.z - deltaT.z) {
+        return vec3(0.0, -step.y, 0.0);
+    } else {
+        return vec3(0.0, 0.0, -step.z);
+    }
+}
+
+// Handle voxel-centric plane fitting with iterative refinement
+bool tracePlaneVoxelCentric(vec3 rayOrigin, vec3 rayDir, vec3 tMax, vec3 deltaT) {
+    float hitT = min(min(tMax.x, tMax.y), tMax.z) - min(min(deltaT.x, deltaT.y), deltaT.z);
+    vec3 currentPos = rayOrigin + rayDir * max(0.0, hitT);
+    
+    for (int iter = 0; iter < voxelCentricMaxIterations; iter++) {
+        ivec3 currentVoxel = ivec3(floor(currentPos));
+        
+        // Check if still in grid
+        if (!isInBounds(currentVoxel)) {
+            break;
+        }
+        
+        // Check if current voxel is solid
+        if (texelFetch(voxelData, currentVoxel, 0).r <= 0.0) {
+            currentPos += rayDir * voxelCentricStepSize;
+            continue;
+        }
+        
+        // Get neighborhood around current position
+        int neighborCount;
+        
+        if (useSphericalNeighborhood == 1) {
+            neighborCount = getNeighborsSpherical(currentPos, sphericalRadius, g_neighbors);
+        } else {
+            neighborCount = getNeighborsVoxel(currentVoxel, neighborhoodRingSize, g_neighbors);
+        }
+        
+        if (neighborCount < 3) {
+            currentPos += rayDir * voxelCentricStepSize;
+            continue;
+        }
+        
+        // Compute plane with voxel-centric weighting
+        vec3 centerVoxelPos = vec3(currentVoxel) + 0.5;
+        vec3 planeCenter, planeNormal;
+        computePlaneVoxelCentric(g_neighbors, neighborCount, currentPos, rayOrigin, centerVoxelPos, planeCenter, planeNormal);
+        
+        // Intersect with plane
+        float planeT;
+        bool planeHit = intersectPlane(rayOrigin, rayDir, planeCenter, planeNormal, planeT);
+        
+        if (planeHit && planeT > 0.0) {
+            vec3 intersectionPoint = rayOrigin + rayDir * planeT;
+            
+            // Check if intersection is within epsilon
+            float dist = distance(intersectionPoint, currentPos);
+            
+            if (dist < voxelCentricEpsilon) {
+                renderSurface(normalize(planeNormal), intersectionPoint);
+                return true;
+            }
+        }
+        
+        currentPos += rayDir * voxelCentricStepSize;
+    }
+    
+    return false;
+}
+
+// Handle ray-centric plane fitting mode
+bool tracePlaneRayCentric(ivec3 voxel, vec3 rayOrigin, vec3 rayDir, vec3 tMax, vec3 deltaT) {
+    int neighborCount;
+    
+    // Get neighbors
+    if (useSphericalNeighborhood == 1) {
+        vec3 samplePoint = findSamplePoint(voxel, rayOrigin, rayDir, tMax, deltaT);
+        neighborCount = getNeighborsSpherical(samplePoint, sphericalRadius, g_neighbors);
+    } else {
+        neighborCount = getNeighborsVoxel(voxel, neighborhoodRingSize, g_neighbors);
+    }
+    
+    // Fit plane using PCA
+    vec3 planeNormal = computePlaneNormal(g_neighbors, neighborCount, rayOrigin, rayDir, vec3(voxel) + 0.5);
+    
+    // Calculate plane center for intersection
+    vec3 planeCenter;
+    if (useDistanceWeighting) {
+        float effectiveRingSize = (useSphericalNeighborhood == 1) ? sphericalRadius : float(neighborhoodRingSize);
+        int ringSize = int(effectiveRingSize);
+        planeCenter = computeWeightedCentroid(g_neighbors, neighborCount, rayOrigin, rayDir, ringSize);
+    } else {
+        planeCenter = computeCentroid(g_neighbors, neighborCount);
+    }
+    
+    // Intersect with plane
+    float planeT;
+    bool hit = intersectPlane(rayOrigin, rayDir, planeCenter, planeNormal, planeT);
+    
+    if (hit) {
+        vec3 intersectionPoint = rayOrigin + rayDir * planeT;
+        ivec3 voxelCoords = ivec3(floor(intersectionPoint));
+
+        // Check if intersection is in the current voxel (if bounds checking is enabled)
+        if (checkBounds) {
+            if (all(equal(voxelCoords, voxel))) {
+                renderSurface(planeNormal, intersectionPoint);
+                return true;
+            }
+        } else {
+            renderSurface(planeNormal, intersectionPoint);
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+bool areCoplanar(int count) {
+    if (count < 4) return true;
+
+    const float epsilon = 1e-6f;
+
+    vec3 A = g_neighbors[0];
+    int idxB = -1, idxC = -1;
+    for (int i = 1; i < count; ++i) {
+        if (distance(g_neighbors[i], A) > epsilon) {
+            idxB = i;
+            break;
+        }
+    }
+    if (idxB == -1) return true; // all points equal
+
+    vec3 B = g_neighbors[idxB];
+    for (int i = idxB + 1; i < count; ++i) {
+        vec3 v1 = B - A;
+        vec3 v2 = g_neighbors[i] - A;
+        if (length(cross(v1,v2)) > epsilon) {
+            idxC = i;
+            break;
+        }
+    }
+    if (idxC == -1) return true; // all points are collinear
+
+    vec3 C = g_neighbors[idxC];
+    vec3 normal = normalize(cross(B- A, C - A));
+
+    for (int i = 0; i < count; ++i) {
+        float d = dot(normal, g_neighbors[i] - A);
+        if (abs(d) > epsilon) return false; // not coplanar
+    }
+
+    return true; // coplanar, no points were outside plane
+}
+
+bool traceSphere(ivec3 voxel, vec3 rayOrigin, vec3 rayDir) {
+    int neighborCount;
+    neighborCount = getNeighborsVoxel(voxel, neighborhoodRingSize, g_neighbors);
+    
+    // if (neighborCount < 4) {
+    //     return false;
+    // }
+
+    if (areCoplanar(neighborCount)) {
+        FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+        return true;
+    }
+
+    for (int i = 0; i < neighborCount; i++) {
+        g_weights[i] = 1.0;
+    }
+
+    vec4 sphere = fitSphere(g_neighbors, g_weights, neighborCount);
+    vec3 center = sphere.xyz;
+    float radius = sphere.w;
+
+    float t_sphere;
+    if (intersectSphere(rayOrigin, rayDir, center, radius, t_sphere)) {
+        vec3 intersection = rayOrigin + rayDir * t_sphere;
+        vec3 normal = normalize(intersection - sphere.xyz);
+        setFragmentDepth(intersection);
+
+        ivec3 hit_voxel = ivec3(floor(intersection));
+                
+        if (checkBounds) {
+            if (all(equal(hit_voxel, voxel))) {
+                renderSurface(normal, intersection);
+                return true;
+            }
+        } else {
+            renderSurface(normal, intersection);
+            return true;
+        }
+    }
+    return false;
+}
+
 void main()
 {
-    // ray generation
+    // Ray generation
     float x = (gl_FragCoord.x / 640.0) * 2.0 - 1.0;
     float y = (gl_FragCoord.y / 480.0) * 2.0 - 1.0;
     vec4 target = invProjection * vec4(x, y, 1.0, 1.0);
-    vec3 rd = vec3(invView * vec4(normalize(vec3(target) / target.w), 0.0));
-    vec3 ro = cameraPos;
+    vec3 rayDir = vec3(invView * vec4(normalize(vec3(target) / target.w), 0.0));
+    vec3 rayOrigin = cameraPos;
 
-    // bounding box intersection
-    vec3 grid_min = vec3(0.0);
-    vec3 grid_max = vec3(gridSize);
-    float t = ray_aabb(ro, rd, grid_min, grid_max);
+    // Bounding box intersection
+    vec3 gridMin = vec3(0.0);
+    vec3 gridMax = vec3(gridSize);
+    float t = ray_aabb(rayOrigin, rayDir, gridMin, gridMax);
     if (t == 1e30) { // didnt hit bounding box
         FragColor = vec4(0.1, 0.1, 0.1, 1.0);
         return;
@@ -425,280 +850,70 @@ void main()
     const float T_MIN = 0.001;
 
     t = max(t, T_MIN);
-    vec3 start_pos = ro + rd * t;
+    vec3 startPos = rayOrigin + rayDir * t;
     
     // DDA initialization
-    ivec3 voxel = ivec3(floor(start_pos));
-    vec3 delta_t = abs(1.0 / rd);
-    ivec3 step = ivec3(sign(rd));
-    
-    // If starting outside grid, clamp to grid boundaries
-    voxel = clamp(voxel, ivec3(0), ivec3(gridSize - 1));
-    
-    // Recalculate start position if we clamped the voxel
-    vec3 grid_start_pos = vec3(voxel) + 0.5;
-    
-    vec3 t_max;
-    for (int i = 0; i < 3; ++i) {
-        if (step[i] > 0) {
-            t_max[i] = t + (float(voxel[i] + 1) - start_pos[i]) * delta_t[i];
-        } else {
-            t_max[i] = t + (start_pos[i] - float(voxel[i])) * delta_t[i];
-        }
-        
-        // Handle case where we're outside the grid
-        if (start_pos[i] < 0.0 && step[i] > 0) {
-            t_max[i] = t + (1.0 - start_pos[i]) * delta_t[i];
-        } else if (start_pos[i] >= float(gridSize) && step[i] < 0) {
-            t_max[i] = t + (start_pos[i] - float(gridSize - 1)) * delta_t[i];
-        }
-    }
+    ivec3 voxel;
+    vec3 deltaT;
+    ivec3 step;
+    vec3 tMax;
+    initDDA(rayOrigin, rayDir, t, startPos, voxel, deltaT, step, tMax);
     
     // DDA traversal
     for (int i = 0; i < MAX_STEPS; ++i) {
-        if (voxel.x < 0 || voxel.x >= gridSize ||
-            voxel.y < 0 || voxel.y >= gridSize ||
-            voxel.z < 0 || voxel.z >= gridSize) {
+        if (!isInBounds(voxel)) {
             break;
         }
         
-        if (texelFetch(voxelData, voxel, 0).r > 0.0) {
-            vec3 hit_normal;
+        if (texelFetch(voxelData, voxel, 0).r > 0.0) { // if voxel is solid
              
-            if (usePlaneFitting) {
-                if (useVoxelCentricWeighting) {
-                    // voxel-centric with iterative refinement
-                    float hit_t = min(min(t_max.x, t_max.y), t_max.z) - min(min(delta_t.x, delta_t.y), delta_t.z);
-                    vec3 current_pos = ro + rd * max(0.0, hit_t);
-                    bool found_surface = false;
-                    vec3 final_normal;
-                    vec3 final_intersection;
-                    
-                    for (int iter = 0; iter < voxelCentricMaxIterations; iter++) {
-                        ivec3 current_voxel = ivec3(floor(current_pos));
-                        
-                        // Check if still in grid
-                        if (current_voxel.x < 0 || current_voxel.x >= gridSize ||
-                            current_voxel.y < 0 || current_voxel.y >= gridSize ||
-                            current_voxel.z < 0 || current_voxel.z >= gridSize) {
-                            break;
-                        }
-                        
-                        // Check if current voxel is solid
-                        if (texelFetch(voxelData, current_voxel, 0).r <= 0.0) {
-                            // Step forward and continue
-                            current_pos += rd * voxelCentricStepSize;
-                            continue;
-                        }
-                        
-                        // Get neighborhood around current position
-                        vec3 neighbors[MAX_NEIGHBORS];
-                        int neighbor_count;
-                        
-                        if (useSphericalNeighborhood == 1) {
-                            neighbor_count = getSphericalNeighborhood(current_pos, sphericalRadius, neighbors);
-                        } else {
-                            neighbor_count = getVoxelNeighborhood(current_voxel, neighborhoodRingSize, neighbors);
-                        }
-                        
-                        if (neighbor_count < 3) {
-                            // Not enough neighbors, step forward
-                            current_pos += rd * voxelCentricStepSize;
-                            continue;
-                        }
-                        
-                        // Compute plane with voxel-centric weighting
-                        vec3 center_voxel_pos = vec3(current_voxel) + 0.5;
-                        float effectiveRingSize = (useSphericalNeighborhood == 1) ? sphericalRadius : float(neighborhoodRingSize);
-                        int ringSize = int(effectiveRingSize);
-                        vec3 plane_center = calculateVoxelCentricWeightedCentroid(neighbors, neighbor_count, current_pos, ringSize);
-                        mat3 covariance = calculateVoxelCentricWeightedCovarianceMatrix(neighbors, neighbor_count, plane_center, current_pos, ringSize);
-                        
-                        vec3 eigenvalues;
-                        mat3 eigenvectors;
-                        solveEigenSystem(covariance, eigenvalues, eigenvectors);
-                        
-                        int smallest_eigenvalue = 0;
-                        if (eigenvalues[1] < eigenvalues[smallest_eigenvalue]) {
-                            smallest_eigenvalue = 1;
-                        }
-                        if (eigenvalues[2] < eigenvalues[smallest_eigenvalue]) {
-                            smallest_eigenvalue = 2;
-                        }
-                        vec3 plane_normal = eigenvectors[smallest_eigenvalue];
-                        
-                        // Orient normal toward camera
-                        vec3 view_direction = normalize(ro - center_voxel_pos);
-                        if (dot(plane_normal, view_direction) < 0.0) {
-                            plane_normal = -plane_normal;
-                        }
-                        
-                        // Intersect with plane
-                        float plane_t;
-                        bool plane_hit = intersectPlane(ro, rd, plane_center, plane_normal, plane_t);
-                        
-                        if (plane_hit && plane_t > 0.0) {
-                            vec3 intersection_point = ro + rd * plane_t;
-                            
-                            // Check if intersection is within epsilon
-                            vec3 diff = intersection_point - current_pos;
-                            float dist = length(diff);
-
-                            
-                            if (dist < voxelCentricEpsilon) {
-                                found_surface = true;
-                                final_normal = normalize(plane_normal);
-                                final_intersection = intersection_point;
-                                break;
-                            }
-                        }
-                        
-                        // Step forward along ray
-                        current_pos += rd * voxelCentricStepSize;
-                    }
-                    
-                    if (found_surface) {
-                        setFragmentDepth(final_intersection);
-                        if (usePhongLighting) {
-                            vec3 result = calculatePhongLighting(final_normal, final_intersection);
-                            FragColor = vec4(result, 1.0);
-                        } else {
-                            FragColor = vec4(abs(final_normal) * 0.7 + 0.3, 1.0);
-                        }
+            if (useFitting) {
+                // === SPHERE FITTING MODE ===
+                if (surfaceType == 1) {
+                    if (traceSphere(voxel, rayOrigin, rayDir)) {
                         return;
                     }
                     
-                } else {
-                    // ray-centric mode
-                    vec3 neighbors[MAX_NEIGHBORS];
-                    int neighbor_count;
-                    
-                    if (useSphericalNeighborhood == 1) {
-                        vec3 sample_point;
-                        if (useVoxelCenterForSphere) {
-                            sample_point = vec3(voxel) + 0.5;
-                        } else {
-                            float hit_t = min(min(t_max.x, t_max.y), t_max.z) - min(min(delta_t.x, delta_t.y), delta_t.z);
-                            sample_point = ro + rd * hit_t;
-                        }
-                        neighbor_count = getSphericalNeighborhood(sample_point, sphericalRadius, neighbors);
-                    } else {
-                        neighbor_count = getVoxelNeighborhood(voxel, neighborhoodRingSize, neighbors);
-                    }
-                    
-                    vec3 plane_center;
-                    mat3 covariance;
-                    
-                    if (useDistanceWeighting) {
-                        // Use sphericalRadius for weighting if spherical neighborhoods are enabled
-                        float effectiveRingSize = (useSphericalNeighborhood == 1) ? sphericalRadius : float(neighborhoodRingSize);
-                        int ringSize = int(effectiveRingSize);
-                        plane_center = calculateWeightedCentroid(neighbors, neighbor_count, ro, rd, ringSize);
-                        covariance = calculateWeightedCovarianceMatrix(neighbors, neighbor_count, plane_center, ro, rd, ringSize);
-                    } else {
-                        plane_center = calculateCentroid(neighbors, neighbor_count);
-                        covariance = calculateCovarianceMatrix(neighbors, neighbor_count, plane_center);
-                    }
-                    
-                    vec3 eigenvalues;
-                    mat3 eigenvectors;
-                    solveEigenSystem(covariance, eigenvalues, eigenvectors);
-
-                    int smallest_eigenvalue = 0;
-                    if (eigenvalues[1] < eigenvalues[smallest_eigenvalue]) {
-                        smallest_eigenvalue = 1;
-                    }
-                    if (eigenvalues[2] < eigenvalues[smallest_eigenvalue]) {
-                        smallest_eigenvalue = 2;
-                    }
-                    vec3 plane_normal = eigenvectors[smallest_eigenvalue];
-                    
-                    vec3 view_direction = normalize(ro - (vec3(voxel) + 0.5));
-                    if (dot(plane_normal, view_direction) < 0.0) {
-                        plane_normal = -plane_normal;
-                    }
-                    
-                    float t_plane;
-                    bool hit = intersectPlane(ro, rd, plane_center, plane_normal, t_plane);
-                    
-                    if (hit) {
-                        vec3 intersection_point = ro + rd * t_plane;
-                        ivec3 voxel_coords = ivec3(floor(intersection_point));
-
-                        if (checkBounds) {
-                            if (all(equal(voxel_coords, voxel))) {
-                                plane_normal = normalize(plane_normal);
-                                hit_normal = plane_normal;
-                                
-                                setFragmentDepth(intersection_point);
-                                if (usePhongLighting) {
-                                    vec3 result = calculatePhongLighting(hit_normal, intersection_point);
-                                    FragColor = vec4(result, 1.0);
-                                } else {
-                                    FragColor = vec4(abs(hit_normal) * 0.7 + 0.3, 1.0);
-                                }
-                                return;
-                            }
-                        }
-                        else {
-                            plane_normal = normalize(plane_normal);
-                            hit_normal = plane_normal;
-                            
-                            setFragmentDepth(intersection_point);
-                            if (usePhongLighting) {
-                                vec3 result = calculatePhongLighting(hit_normal, intersection_point);
-                                FragColor = vec4(result, 1.0);
-                            } else {
-                                FragColor = vec4(abs(hit_normal) * 0.7 + 0.3, 1.0);
-                            }
+                } else { // === PLANE FITTING MODES ===
+                    // === VOXEL-CENTRIC WEIGHTING MODE ===
+                    if (useVoxelCentricWeighting) {
+                        if (tracePlaneVoxelCentric(rayOrigin, rayDir, tMax, deltaT)) {
                             return;
                         }
-                        // if the intersection point isnt in the current voxel, we continue voxel traversal
+                        
+                    } else { // === RAY-CENTRIC WEIGHTING MODE ===
+                        if (tracePlaneRayCentric(voxel, rayOrigin, rayDir, tMax, deltaT)) {
+                            return;
+                        }
                     }
                 }
 
-            } else {
-                if (t_max.x - delta_t.x > t_max.y - delta_t.y && t_max.x - delta_t.x > t_max.z - delta_t.z) {
-                    hit_normal = vec3(-step.x, 0.0, 0.0);
-                } else if (t_max.y - delta_t.y > t_max.z - delta_t.z) {
-                    hit_normal = vec3(0.0, -step.y, 0.0);
-                } else {
-                    hit_normal = vec3(0.0, 0.0, -step.z);
-                }
-                
-                // calculate intersection point for this voxel
-                vec3 intersection_point = ro + rd * (min(min(t_max.x, t_max.y), t_max.z) - min(min(delta_t.x, delta_t.y), delta_t.z));
-                setFragmentDepth(intersection_point);
-                
-                if (usePhongLighting) {
-                    vec3 result = calculatePhongLighting(hit_normal, intersection_point);
-                    FragColor = vec4(result, 1.0);
-                } else {
-                    FragColor = vec4(abs(hit_normal) * 0.7 + 0.3, 1.0);
-                }
+            } else { // Basic voxel rendering without fitting
+                vec3 hitNormal = getVoxelNormal(tMax, deltaT, step);
+                vec3 intersectionPoint = rayOrigin + rayDir * (min(min(tMax.x, tMax.y), tMax.z) - min(min(deltaT.x, deltaT.y), deltaT.z));
+                renderSurface(hitNormal, intersectionPoint);
                 return;
             }
         }
-        
-        // step to next voxel
-        if (t_max.x < t_max.y) {
-            if (t_max.x < t_max.z) {
+        // Step to next voxel
+        if (tMax.x < tMax.y) {
+            if (tMax.x < tMax.z) {
                 voxel.x += step.x;
-                t_max.x += delta_t.x;
+                tMax.x += deltaT.x;
             } else {
                 voxel.z += step.z;
-                t_max.z += delta_t.z;
+                tMax.z += deltaT.z;
             }
         } else {
-            if (t_max.y < t_max.z) {
+            if (tMax.y < tMax.z) {
                 voxel.y += step.y;
-                t_max.y += delta_t.y;
+                tMax.y += deltaT.y;
             } else {
                 voxel.z += step.z;
-                t_max.z += delta_t.z;
+                tMax.z += deltaT.z;
             }
         }
     }
     
-    FragColor = vec4(0.1, 0.1, 0.1, 1.0); // didnt hit a voxel
+    FragColor = vec4(0.1, 0.1, 0.1, 1.0); // Didn't hit a voxel
 }
