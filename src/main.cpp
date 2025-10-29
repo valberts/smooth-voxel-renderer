@@ -1,4 +1,5 @@
 #include "config.h"
+#include "picking.h"
 
 // --- globals ---
 unsigned int VAO, VBO;
@@ -9,10 +10,13 @@ std::vector<unsigned char> voxelGrid(GRID_SIZE * GRID_SIZE * GRID_SIZE, 0);
 unsigned int voxelTexture;
 unsigned int sdfCentersTexture;
 unsigned int sdfNormalsTexture;
+
 bool useFitting = 1;
 bool checkBounds = 1;
 int k_neighbors = 64;
 int neighborhood_ring_size = 1;
+float sphereRadius = 1.0f;
+float sphereThickness = 1.0f;
 
 // debug wireframe
 bool showDebugWireframe = false;
@@ -31,6 +35,7 @@ int falloffMode = 0; // 0 = linear, 1 = gaussian
 
 // Surface type
 int surfaceType = 0; // 0 = plane, 1 = sphere
+bool visualizeRadius = false;
 
 // Voxel-centric weighting variables
 bool useVoxelCentricWeighting = false;
@@ -69,6 +74,7 @@ void updateWireframeGeometry();
 enum ShapeType
 {
     SHAPE_SPHERE,
+    SHAPE_SMALLSPHERE,
     SHAPE_STAIRCASE_1_1,
     SHAPE_STAIRCASE_2_1,
     SHAPE_CUBE,
@@ -93,6 +99,31 @@ enum TestCase
 };
 int currentTestCase = TestCase::TEST_SINGLE_CENTER;
 
+// Forward declarations
+void setupVoxelGrid();
+void setupVoxelTexture();
+
+// Keyboard callback for voxel deletion
+void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+    if (key == GLFW_KEY_X && action == GLFW_PRESS) {
+        glm::ivec3 hoveredVoxel = getHoveredVoxel();
+        if (hoveredVoxel.x >= 0 && hoveredVoxel.x < GRID_SIZE &&
+            hoveredVoxel.y >= 0 && hoveredVoxel.y < GRID_SIZE &&
+            hoveredVoxel.z >= 0 && hoveredVoxel.z < GRID_SIZE) {
+            
+            // Delete the voxel
+            int idx = hoveredVoxel.x + hoveredVoxel.y * GRID_SIZE + hoveredVoxel.z * GRID_SIZE * GRID_SIZE;
+            voxelGrid[idx] = 0;
+            
+            // Update the GPU texture (don't regenerate the whole grid)
+            setupVoxelTexture();
+            
+            std::cout << "Deleted voxel at (" << hoveredVoxel.x << ", " 
+                      << hoveredVoxel.y << ", " << hoveredVoxel.z << ")" << std::endl;
+        }
+    }
+}
+
 int main()
 {
     // --- setup ---
@@ -114,6 +145,11 @@ int main()
 
     window = glfwCreateWindow(640, 480, "", NULL, NULL); // empty window name
     glfwMakeContextCurrent(window);
+
+    // Register input callbacks
+    glfwSetCursorPosCallback(window, mouse_callback);
+    glfwSetMouseButtonCallback(window, mouse_button_callback);
+    glfwSetKeyCallback(window, key_callback);
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
     {
@@ -142,6 +178,9 @@ int main()
     setupQuad();
     setupWireframeGeometry();
 
+    // Setup picking SSBO
+    setupPickingSSBO();
+
     // --- rendering ---
     while (!glfwWindowShouldClose(window))
     {
@@ -158,7 +197,6 @@ int main()
 
         int width, height;
         glfwGetFramebufferSize(window, &width, &height);
-        glViewport(0, 0, width, height);
 
         // camera logic
         glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)width / (float)height, 0.1f, 1000.0f);
@@ -167,7 +205,11 @@ int main()
         glm::mat4 invProjection = glm::inverse(projection);
         glm::mat4 invView = glm::inverse(view);
 
-        // Send uniforms to the shader
+        // Render to screen
+        glViewport(0, 0, width, height);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glEnable(GL_DEPTH_TEST);
+        glUseProgram(shader);
         glUniformMatrix4fv(glGetUniformLocation(shader, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
         glUniformMatrix4fv(glGetUniformLocation(shader, "view"), 1, GL_FALSE, glm::value_ptr(view));
         glUniformMatrix4fv(glGetUniformLocation(shader, "invProjection"), 1, GL_FALSE, glm::value_ptr(invProjection));
@@ -189,22 +231,31 @@ int main()
         glUniform1i(glGetUniformLocation(shader, "useSphericalNeighborhood"), useSphericalNeighborhood);
         glUniform1f(glGetUniformLocation(shader, "sphericalRadius"), sphericalRadius);
         glUniform1i(glGetUniformLocation(shader, "useVoxelCenterForSphere"), useVoxelCenterForSphere);
+        glUniform1i(glGetUniformLocation(shader, "visualizeRadius"), visualizeRadius);
+
+        // Mouse picking uniforms
+        glUniform2f(glGetUniformLocation(shader, "mousePixel"), (float)lastMouseX, (float)height - (float)lastMouseY);
+        glUniform1i(glGetUniformLocation(shader, "shouldUpdateClicked"), hasClickedVoxel);
+
+        // Bind picking SSBO
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, pickingSSBO);
 
         // bind voxel data texture and draw
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_3D, voxelTexture);
         glUniform1i(glGetUniformLocation(shader, "voxelData"), 0);
 
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_3D, sdfCentersTexture);
-        glUniform1i(glGetUniformLocation(shader, "sdfCenters"), 1);
-
-        glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_3D, sdfNormalsTexture);
-        glUniform1i(glGetUniformLocation(shader, "sdfNormals"), 2);
-
         glBindVertexArray(VAO);
         glDrawArrays(GL_TRIANGLES, 0, 6);
+
+        // Ensure SSBO writes are complete before reading back
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+        // Reset clicked flag after frame
+        if (hasClickedVoxel)
+        {
+            hasClickedVoxel = false;
+        }
 
         // render wireframe overlay
         if (showDebugWireframe && wireframeVertexCount > 0)
@@ -250,6 +301,7 @@ int main()
     glDeleteBuffers(1, &wireframeVBO);
     glDeleteProgram(shader);
     glDeleteProgram(wireframeShader);
+    cleanupPickingSSBO();
     glfwTerminate();
     return 0;
 }
@@ -308,6 +360,11 @@ void drawGui(float deltaTime)
             const char *surfaceItems[] = {"Plane", "Sphere"};
             ImGui::Combo("Surface Type", &surfaceType, surfaceItems, IM_ARRAYSIZE(surfaceItems));
 
+            if (surfaceType == 1)
+            {
+                ImGui::Checkbox("Show Sphere Radius", &visualizeRadius);
+            }
+
             ImGui::Checkbox("Use Ray-Centric Weighting", &useDistanceWeighting);
             if (useDistanceWeighting)
             {
@@ -338,6 +395,7 @@ void drawGui(float deltaTime)
         {
             const char *items[] = {
                 "Sphere",
+                "Small Sphere",
                 "Staircase (1:1)",
                 "Staircase (2:1)",
                 "Cube",
@@ -349,7 +407,15 @@ void drawGui(float deltaTime)
                 currentShape = static_cast<ShapeType>(current_item_index);
                 std::cout << "Shape changed, regenerating voxel grid..." << std::endl;
                 setupVoxelGrid();
-                // precomputeSdf();
+            }
+            if (currentShape == ShapeType::SHAPE_SMALLSPHERE)
+            {
+                bool radiusChanged = ImGui::SliderFloat("Sphere Radius", &sphereRadius, 1.0f, 10.0f);
+                bool thicknessChanged = ImGui::SliderFloat("Sphere Thickness", &sphereThickness, 1.0f, 10.0f);
+                if (radiusChanged || thicknessChanged)
+                {
+                    setupVoxelGrid();
+                }
             }
         }
 
@@ -407,6 +473,33 @@ void drawGui(float deltaTime)
 
         ImGui::Separator();
         ImGui::Checkbox("Show Wireframe", &showDebugWireframe);
+
+        ImGui::Separator();
+        // Read picking data from SSBO for display
+        PickingData pickingInfo = readPickingData();
+        if (pickingInfo.hoveredVoxel.w > 0)
+        {
+            ImGui::Text("Hovered: (%d, %d, %d) [count: %d]",
+                        pickingInfo.hoveredVoxel.x, pickingInfo.hoveredVoxel.y, pickingInfo.hoveredVoxel.z,
+                        pickingInfo.hoveredNeighborCount);
+        }
+        else
+        {
+            ImGui::Text("Hovered: None (w=%d)", pickingInfo.hoveredVoxel.w);
+        }
+
+        if (pickingInfo.clickedVoxel.w > 0)
+        {
+            ImGui::Text("Clicked neighbors: %d", pickingInfo.clickedNeighborCount);
+            if (useSphericalNeighborhood)
+            {
+                ImGui::Text("Mode: Spherical (r=%.1f)", sphericalRadius);
+            }
+            else
+            {
+                ImGui::Text("Mode: Cubic (ring=%d)", neighborhood_ring_size);
+            }
+        }
 
         ImGui::End();
     }
@@ -536,6 +629,31 @@ void generateSphere()
             }
 }
 
+void generateSmallSphere()
+{
+    glm::vec3 center(GRID_SIZE / 2.0);
+    // grid size is 64x64x64
+    float outerRadius = sphereRadius;
+    float shellThickness = sphereThickness;
+    float innerRadius = outerRadius - shellThickness;
+
+    for (int z = 0; z < GRID_SIZE; ++z)
+        for (int y = 0; y < GRID_SIZE; ++y)
+            for (int x = 0; x < GRID_SIZE; ++x)
+            {
+                float dist = glm::distance(glm::vec3(x, y, z), center);
+                int idx = x + y * GRID_SIZE + z * GRID_SIZE * GRID_SIZE;
+                if (dist <= outerRadius && dist > innerRadius)
+                {
+                    voxelGrid[idx] = 255; // shell
+                }
+                else
+                {
+                    voxelGrid[idx] = 0; // empty (inside or outside)
+                }
+            }
+}
+
 void generateStaircase(int treadWidth, int riserHeight)
 {
     int start_x = GRID_SIZE / 12;
@@ -654,6 +772,9 @@ void setupVoxelGrid()
         case SHAPE_SPHERE:
             generateSphere();
             break;
+        case SHAPE_SMALLSPHERE:
+            generateSmallSphere();
+            break;
         case SHAPE_STAIRCASE_1_1:
             generateStaircase(1, 1);
             break;
@@ -679,6 +800,11 @@ void setupVoxelGrid()
 
 void setupVoxelTexture()
 {
+    if (voxelTexture != 0)
+    {
+        glDeleteTextures(1, &voxelTexture);
+        voxelTexture = 0;
+    }
     glGenTextures(1, &voxelTexture);
     glBindTexture(GL_TEXTURE_3D, voxelTexture);
 

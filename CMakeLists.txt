@@ -6,7 +6,15 @@ find_package(glfw3 CONFIG REQUIRED)
 find_package(glad CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
 
-add_executable(smooth_voxel_renderer src/config.h src/main.cpp  "src/Camera.h"  "src/SurfaceReconstruction.h" "src/SurfaceReconstruction.cpp")
+add_executable(smooth_voxel_renderer 
+    src/config.h 
+    src/main.cpp 
+    src/Camera.h 
+    src/SurfaceReconstruction.h 
+    src/SurfaceReconstruction.cpp
+    src/picking.h
+    src/picking.cpp
+)
 
 target_link_libraries(smooth_voxel_renderer
     PRIVATE

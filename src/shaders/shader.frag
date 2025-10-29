@@ -1,7 +1,7 @@
-#version 330 core
+#version 430 core
 #define M_PI 3.1415926535897932384626433832795
 
-out vec4 FragColor;
+layout(location = 0) out vec4 FragColor;
 
 uniform sampler3D voxelData;
 uniform bool useFitting;
@@ -23,10 +23,28 @@ uniform int voxelCentricMaxIterations;
 uniform int useSphericalNeighborhood;
 uniform float sphericalRadius;
 uniform bool useVoxelCenterForSphere;
+uniform bool visualizeRadius;
 uniform int falloffMode; // 0 = linear, 1 = gaussian
 uniform int surfaceType; // 0 = plane, 1 = sphere
 
+// Mouse picking
+uniform vec2 mousePixel; // Mouse position in screen coordinates
+uniform bool shouldUpdateClicked; // True when left mouse button clicked
+
 const int MAX_NEIGHBORS = 343;
+
+// GPU Picking Data - written by shader, read by CPU
+layout(std430, binding = 0) buffer PickingData {
+    ivec4 hoveredVoxel;               // xyz = voxel coords, w = valid flag
+    int hoveredNeighborCount;
+    int padding1[3];
+    ivec4 hoveredNeighbors[MAX_NEIGHBORS];
+    
+    ivec4 clickedVoxel;                // xyz = voxel coords, w = valid flag
+    int clickedNeighborCount;
+    int padding2[3];
+    ivec4 clickedNeighbors[MAX_NEIGHBORS];
+} pickingData;
 
 // Global arrays to avoid register pressure from multiple large local arrays
 vec3 g_neighbors[MAX_NEIGHBORS];
@@ -425,12 +443,10 @@ vec4 fitSphere(vec3 neighbors[MAX_NEIGHBORS], float weights[MAX_NEIGHBORS], int 
     // STEP 6: Calculate radius
     // r² = (4d + a² + b² + c²) / 4
     float r_squared = (4.0 * d + a*a + b*b + c*c) * 0.25;
-    
-    // Alternative (same result):
-    // float r_squared = (4.0 * d + a*a + b*b + c*c) * 0.5 * 0.5;
+
     
     if (r_squared <= 0.0) {
-        return vec4(center, -1.0);  // Invalid
+        return vec4(center, -2.0);  // Invalid
     }
     
     float radius = sqrt(r_squared);
@@ -630,6 +646,87 @@ vec3 findSamplePoint(ivec3 voxel, vec3 rayOrigin, vec3 rayDir, vec3 tMax, vec3 d
     }
 }
 
+// Update picking data if this pixel is at the mouse cursor
+void updatePickingAtMouse(ivec3 voxel, vec3 samplePoint) {
+    // Check if we're rendering the pixel under the mouse (use 1.5 pixel threshold for safety)
+    if (distance(gl_FragCoord.xy, mousePixel) < 1.5) {
+        // This is the hovered voxel - update SSBO
+        pickingData.hoveredVoxel = ivec4(voxel, 1);
+        
+        // Gather neighbors based on current mode
+        int neighborCount = 0;
+        
+        if (useSphericalNeighborhood > 0) {
+            // Spherical neighborhood
+            int maxOffset = int(ceil(sphericalRadius));
+            for (int z = -maxOffset; z <= maxOffset && neighborCount < MAX_NEIGHBORS; z++) {
+                for (int y = -maxOffset; y <= maxOffset && neighborCount < MAX_NEIGHBORS; y++) {
+                    for (int x = -maxOffset; x <= maxOffset && neighborCount < MAX_NEIGHBORS; x++) {
+                        ivec3 neighbor = voxel + ivec3(x, y, z);
+                        if (isInBounds(neighbor) && texelFetch(voxelData, neighbor, 0).r > 0.0) {
+                            vec3 neighborPos = useVoxelCenterForSphere ? 
+                                (vec3(neighbor) + 0.5) : vec3(neighbor);
+                            if (distance(samplePoint, neighborPos) <= sphericalRadius) {
+                                pickingData.hoveredNeighbors[neighborCount++] = ivec4(neighbor, 1);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Cubic neighborhood
+            for (int z = -neighborhoodRingSize; z <= neighborhoodRingSize && neighborCount < MAX_NEIGHBORS; z++) {
+                for (int y = -neighborhoodRingSize; y <= neighborhoodRingSize && neighborCount < MAX_NEIGHBORS; y++) {
+                    for (int x = -neighborhoodRingSize; x <= neighborhoodRingSize && neighborCount < MAX_NEIGHBORS; x++) {
+                        ivec3 neighbor = voxel + ivec3(x, y, z);
+                        if (isInBounds(neighbor) && texelFetch(voxelData, neighbor, 0).r > 0.0) {
+                            pickingData.hoveredNeighbors[neighborCount++] = ivec4(neighbor, 1);
+                        }
+                    }
+                }
+            }
+        }
+        
+        pickingData.hoveredNeighborCount = neighborCount;
+    }
+    
+    // Handle click - check anywhere in the frame, not just at mouse pixel
+    // This allows clicking to work even if we process a different pixel first
+    if (shouldUpdateClicked && pickingData.hoveredVoxel.w > 0) {
+        pickingData.clickedVoxel = pickingData.hoveredVoxel;
+        pickingData.clickedNeighborCount = pickingData.hoveredNeighborCount;
+        for (int i = 0; i < pickingData.hoveredNeighborCount; i++) {
+            pickingData.clickedNeighbors[i] = pickingData.hoveredNeighbors[i];
+        }
+    }
+}
+
+// Overload that calculates sample point from DDA parameters
+void updatePickingAtMouse(ivec3 voxel, vec3 rayOrigin, vec3 rayDir, vec3 tMax, vec3 deltaT) {
+    vec3 samplePoint = findSamplePoint(voxel, rayOrigin, rayDir, tMax, deltaT);
+    updatePickingAtMouse(voxel, samplePoint);
+}
+
+// Check if a voxel should be highlighted
+vec4 getHighlightColor(ivec3 voxel) {
+    // Check if this is the hovered voxel (white)
+    if (pickingData.hoveredVoxel.w > 0 && 
+        all(equal(voxel, pickingData.hoveredVoxel.xyz))) {
+        return vec4(1.0, 1.0, 1.0, 1.0);
+    }
+    
+    // Check if this is one of the clicked neighbors (yellow)
+    if (pickingData.clickedVoxel.w > 0) {
+        for (int i = 0; i < pickingData.clickedNeighborCount; i++) {
+            if (all(equal(voxel, pickingData.clickedNeighbors[i].xyz))) {
+                return vec4(1.0, 1.0, 0.0, 1.0);
+            }
+        }
+    }
+    
+    return vec4(0.0); // No highlight
+}
+
 // Calculate basic voxel normal from DDA traversal direction
 vec3 getVoxelNormal(vec3 tMax, vec3 deltaT, ivec3 step) {
     if (tMax.x - deltaT.x > tMax.y - deltaT.y && tMax.x - deltaT.x > tMax.z - deltaT.z) {
@@ -690,6 +787,7 @@ bool tracePlaneVoxelCentric(vec3 rayOrigin, vec3 rayDir, vec3 tMax, vec3 deltaT)
             float dist = distance(intersectionPoint, currentPos);
             
             if (dist < voxelCentricEpsilon) {
+                updatePickingAtMouse(currentVoxel, rayOrigin, rayDir, tMax, deltaT);
                 renderSurface(normalize(planeNormal), intersectionPoint);
                 return true;
             }
@@ -737,10 +835,12 @@ bool tracePlaneRayCentric(ivec3 voxel, vec3 rayOrigin, vec3 rayDir, vec3 tMax, v
         // Check if intersection is in the current voxel (if bounds checking is enabled)
         if (checkBounds) {
             if (all(equal(voxelCoords, voxel))) {
+                updatePickingAtMouse(voxel, rayOrigin, rayDir, tMax, deltaT);
                 renderSurface(planeNormal, intersectionPoint);
                 return true;
             }
         } else {
+            updatePickingAtMouse(voxel, rayOrigin, rayDir, tMax, deltaT);
             renderSurface(planeNormal, intersectionPoint);
             return true;
         }
@@ -789,13 +889,10 @@ bool areCoplanar(int count) {
 bool traceSphere(ivec3 voxel, vec3 rayOrigin, vec3 rayDir) {
     int neighborCount;
     neighborCount = getNeighborsVoxel(voxel, neighborhoodRingSize, g_neighbors);
-    
-    // if (neighborCount < 4) {
-    //     return false;
-    // }
 
     if (areCoplanar(neighborCount)) {
-        FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+        updatePickingAtMouse(voxel, vec3(voxel) + 0.5);
+        FragColor = vec4(1.0, 0.0, 0.0, 1.0); // coplanar
         return true;
     }
 
@@ -807,9 +904,27 @@ bool traceSphere(ivec3 voxel, vec3 rayOrigin, vec3 rayDir) {
     vec3 center = sphere.xyz;
     float radius = sphere.w;
 
+    if (visualizeRadius && !checkBounds) {
+        updatePickingAtMouse(voxel, vec3(voxel) + 0.5);
+        float mapped = clamp(radius / 1000.0, 0.0, 1.0);
+        FragColor = vec4(vec3(mapped), 1.0);
+        return true;
+    }
+
+    if (radius == -1.0) {
+        updatePickingAtMouse(voxel, vec3(voxel) + 0.5);
+        FragColor = vec4(1.0, 1.0, 0.0, 0.0); // invalid radius
+        return true;
+    } else if (radius == -2.0) {
+        updatePickingAtMouse(voxel, vec3(voxel) + 0.5);
+        FragColor = vec4(0.0, 1.0, 1.0, 0.0); // failed to fit
+        return true;
+    }
+
     float t_sphere;
     if (intersectSphere(rayOrigin, rayDir, center, radius, t_sphere)) {
         vec3 intersection = rayOrigin + rayDir * t_sphere;
+
         vec3 normal = normalize(intersection - sphere.xyz);
         setFragmentDepth(intersection);
 
@@ -817,10 +932,18 @@ bool traceSphere(ivec3 voxel, vec3 rayOrigin, vec3 rayDir) {
                 
         if (checkBounds) {
             if (all(equal(hit_voxel, voxel))) {
+            if (visualizeRadius) {
+                updatePickingAtMouse(voxel, vec3(voxel) + 0.5);
+                float mapped = clamp(radius / 10.0, 0.0, 1.0);
+                FragColor = vec4(vec3(mapped), 1.0);
+                return true;
+            }
+                updatePickingAtMouse(voxel, vec3(voxel) + 0.5);
                 renderSurface(normal, intersection);
                 return true;
             }
         } else {
+            updatePickingAtMouse(voxel, vec3(voxel) + 0.5);
             renderSurface(normal, intersection);
             return true;
         }
@@ -842,6 +965,11 @@ void main()
     vec3 gridMax = vec3(gridSize);
     float t = ray_aabb(rayOrigin, rayDir, gridMin, gridMax);
     if (t == 1e30) { // didnt hit bounding box
+        // Clear hovered voxel if this is the mouse pixel
+        if (distance(gl_FragCoord.xy, mousePixel) < 1.5) {
+            pickingData.hoveredVoxel = ivec4(-1, -1, -1, 0);
+            pickingData.hoveredNeighborCount = 0;
+        }
         FragColor = vec4(0.1, 0.1, 0.1, 1.0);
         return;
     }
@@ -866,6 +994,15 @@ void main()
         }
         
         if (texelFetch(voxelData, voxel, 0).r > 0.0) { // if voxel is solid
+            
+            // Check for highlighting
+            vec4 highlightColor = getHighlightColor(voxel);
+            if (highlightColor.w > 0.0) {
+                vec3 intersectionPoint = rayOrigin + rayDir * (min(min(tMax.x, tMax.y), tMax.z) - min(min(deltaT.x, deltaT.y), deltaT.z));
+                setFragmentDepth(intersectionPoint);
+                FragColor = highlightColor;
+                return;
+            }
              
             if (useFitting) {
                 // === SPHERE FITTING MODE ===
@@ -891,6 +1028,7 @@ void main()
             } else { // Basic voxel rendering without fitting
                 vec3 hitNormal = getVoxelNormal(tMax, deltaT, step);
                 vec3 intersectionPoint = rayOrigin + rayDir * (min(min(tMax.x, tMax.y), tMax.z) - min(min(deltaT.x, deltaT.y), deltaT.z));
+                updatePickingAtMouse(voxel, rayOrigin, rayDir, tMax, deltaT);
                 renderSurface(hitNormal, intersectionPoint);
                 return;
             }
@@ -915,5 +1053,11 @@ void main()
         }
     }
     
+    // Clear hovered voxel if this is the mouse pixel and we didn't hit anything
+    if (distance(gl_FragCoord.xy, mousePixel) < 1.5) {
+        pickingData.hoveredVoxel = ivec4(-1, -1, -1, 0);
+        pickingData.hoveredNeighborCount = 0;
+    }
+
     FragColor = vec4(0.1, 0.1, 0.1, 1.0); // Didn't hit a voxel
 }
