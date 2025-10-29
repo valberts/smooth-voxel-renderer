@@ -379,13 +379,23 @@ vec4 fitSphere(vec3 neighbors[MAX_NEIGHBORS], float weights[MAX_NEIGHBORS], int 
         return vec4(0.0, 0.0, 0.0, -1.0);
     }
     
-    // STEP 2: Initialize matrices
+    // STEP 2: Compute weighted center for numerical stability
+    vec3 dataCenter = vec3(0.0);
+    float totalWeight = 0.0;
+    for (int i = 0; i < N; ++i) {
+        dataCenter += weights[i] * neighbors[i];
+        totalWeight += weights[i];
+    }
+    dataCenter /= totalWeight;
+    
+    // STEP 3: Initialize matrices
     mat4 ATA = mat4(0.0);
     vec4 ATB = vec4(0.0);
     
-    // STEP 3: Accumulate A^T·A and A^T·B with weights
+    // STEP 4: Accumulate A^T·A and A^T·B with centered coordinates
     for (int i = 0; i < N; ++i) {
-        vec3 p = neighbors[i];
+        // Translate to origin
+        vec3 p = neighbors[i] - dataCenter;
         float weight = weights[i];
         
         // Row of A: [x, y, z, 1]
@@ -398,52 +408,53 @@ vec4 fitSphere(vec3 neighbors[MAX_NEIGHBORS], float weights[MAX_NEIGHBORS], int 
         float b_i = x*x + y*y + z*z;
         
         // Build A^T·A (symmetric 4x4) with weights
-        ATA[0][0] += weight * x * x;  // Σwi·xi²
-        ATA[0][1] += weight * x * y;  // Σwi·xi·yi
-        ATA[0][2] += weight * x * z;  // Σwi·xi·zi
-        ATA[0][3] += weight * x * w;  // Σwi·xi
+        ATA[0][0] += weight * x * x;
+        ATA[0][1] += weight * x * y;
+        ATA[0][2] += weight * x * z;
+        ATA[0][3] += weight * x * w;
         
-        ATA[1][0] += weight * y * x;  // Σwi·yi·xi (symmetric)
-        ATA[1][1] += weight * y * y;  // Σwi·yi²
-        ATA[1][2] += weight * y * z;  // Σwi·yi·zi
-        ATA[1][3] += weight * y * w;  // Σwi·yi
+        ATA[1][0] += weight * y * x;
+        ATA[1][1] += weight * y * y;
+        ATA[1][2] += weight * y * z;
+        ATA[1][3] += weight * y * w;
         
-        ATA[2][0] += weight * z * x;  // Σwi·zi·xi
-        ATA[2][1] += weight * z * y;  // Σwi·zi·yi
-        ATA[2][2] += weight * z * z;  // Σwi·zi²
-        ATA[2][3] += weight * z * w;  // Σwi·zi
+        ATA[2][0] += weight * z * x;
+        ATA[2][1] += weight * z * y;
+        ATA[2][2] += weight * z * z;
+        ATA[2][3] += weight * z * w;
         
-        ATA[3][0] += weight * w * x;  // Σwi·xi
-        ATA[3][1] += weight * w * y;  // Σwi·yi
-        ATA[3][2] += weight * w * z;  // Σwi·zi
-        ATA[3][3] += weight * w * w;  // Σwi
+        ATA[3][0] += weight * w * x;
+        ATA[3][1] += weight * w * y;
+        ATA[3][2] += weight * w * z;
+        ATA[3][3] += weight * w * w;
         
         // Build A^T·B with weights
-        ATB.x += weight * x * b_i;  // Σwi·xi·(xi²+yi²+zi²)
-        ATB.y += weight * y * b_i;  // Σwi·yi·(xi²+yi²+zi²)
-        ATB.z += weight * z * b_i;  // Σwi·zi·(xi²+yi²+zi²)
-        ATB.w += weight * w * b_i;  // Σwi·(xi²+yi²+zi²)
+        ATB.x += weight * x * b_i;
+        ATB.y += weight * y * b_i;
+        ATB.z += weight * z * b_i;
+        ATB.w += weight * w * b_i;
     }
     
-    // STEP 4: Solve X = (A^T·A)^-1·(A^T·B)
+    // STEP 5: Solve X = (A^T·A)^-1·(A^T·B)
     vec4 X = inverse(ATA) * ATB;
     
     // X = [a, b, c, d]
-    float a = X.x;  // = 2xc
+    float a = X.x;  // = 2xc (relative to centroid)
     float b = X.y;  // = 2yc
     float c = X.z;  // = 2zc
     float d = X.w;  // = r² - xc² - yc² - zc²
     
-    // STEP 5: Extract center
-    vec3 center;
-    center.x = a * 0.5;  // xc = a/2
-    center.y = b * 0.5;  // yc = b/2
-    center.z = c * 0.5;  // zc = c/2
+    // STEP 6: Extract center (relative to dataCenter)
+    vec3 centerRelative;
+    centerRelative.x = a * 0.5;
+    centerRelative.y = b * 0.5;
+    centerRelative.z = c * 0.5;
     
-    // STEP 6: Calculate radius
-    // r² = (4d + a² + b² + c²) / 4
+    // STEP 7: Translate back to world space
+    vec3 center = centerRelative + dataCenter;
+    
+    // STEP 8: Calculate radius
     float r_squared = (4.0 * d + a*a + b*b + c*c) * 0.25;
-
     
     if (r_squared <= 0.0) {
         return vec4(center, -2.0);  // Invalid

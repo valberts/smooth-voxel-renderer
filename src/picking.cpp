@@ -30,8 +30,6 @@ void setupPickingSSBO()
 
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, pickingSSBO);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-
-    std::cout << "Picking SSBO setup complete (binding point 0)" << std::endl;
 }
 
 void cleanupPickingSSBO()
@@ -64,7 +62,6 @@ void mouse_button_callback(GLFWwindow *window, int button, int action, int mods)
     {
         // Left click - the shader will handle copying hovered data to clicked data
         hasClickedVoxel = true;
-        std::cout << "Left click - shader will update clicked voxel" << std::endl;
     }
     else if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_PRESS)
     {
@@ -81,8 +78,6 @@ void mouse_button_callback(GLFWwindow *window, int button, int action, int mods)
 
         glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(PickingData), &data);
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-
-        std::cout << "Right click - cleared clicked voxel" << std::endl;
     }
 }
 
