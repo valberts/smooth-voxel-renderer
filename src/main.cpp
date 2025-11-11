@@ -34,8 +34,14 @@ float distanceWeightMultiplier = 3.0f;
 int falloffMode = 0; // 0 = linear, 1 = gaussian
 
 // Surface type
-int surfaceType = 0; // 0 = plane, 1 = sphere
+int surfaceType = 0; // 0 = plane, 1 = sphere, 2 = quadric (preset), 3 = quadric (fitted)
 bool visualizeRadius = false;
+
+// Quadric parameters (Ax² + By² + Cz² + Dxy + Exz + Fyz + Gx + Hy + Iz + J = 0)
+float quadricA = 1.0f, quadricB = 1.0f, quadricC = 1.0f;
+float quadricD = 0.0f, quadricE = 0.0f, quadricF = 0.0f;
+float quadricG = 0.0f, quadricH = 0.0f, quadricI = 0.0f, quadricJ = -1.0f;
+glm::vec3 quadricCenter(32.0f, 32.0f, 32.0f); // Center position of the quadric
 
 // Voxel-centric weighting variables
 bool useVoxelCentricWeighting = false;
@@ -104,21 +110,24 @@ void setupVoxelGrid();
 void setupVoxelTexture();
 
 // Keyboard callback for voxel deletion
-void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
-    if (key == GLFW_KEY_X && action == GLFW_PRESS) {
+void key_callback(GLFWwindow *window, int key, int scancode, int action, int mods)
+{
+    if (key == GLFW_KEY_X && action == GLFW_PRESS)
+    {
         glm::ivec3 hoveredVoxel = getHoveredVoxel();
         if (hoveredVoxel.x >= 0 && hoveredVoxel.x < GRID_SIZE &&
             hoveredVoxel.y >= 0 && hoveredVoxel.y < GRID_SIZE &&
-            hoveredVoxel.z >= 0 && hoveredVoxel.z < GRID_SIZE) {
-            
+            hoveredVoxel.z >= 0 && hoveredVoxel.z < GRID_SIZE)
+        {
+
             // Delete the voxel
             int idx = hoveredVoxel.x + hoveredVoxel.y * GRID_SIZE + hoveredVoxel.z * GRID_SIZE * GRID_SIZE;
             voxelGrid[idx] = 0;
-            
+
             // Update the GPU texture (don't regenerate the whole grid)
             setupVoxelTexture();
-            
-            std::cout << "Deleted voxel at (" << hoveredVoxel.x << ", " 
+
+            std::cout << "Deleted voxel at (" << hoveredVoxel.x << ", "
                       << hoveredVoxel.y << ", " << hoveredVoxel.z << ")" << std::endl;
         }
     }
@@ -232,6 +241,19 @@ int main()
         glUniform1f(glGetUniformLocation(shader, "sphericalRadius"), sphericalRadius);
         glUniform1i(glGetUniformLocation(shader, "useVoxelCenterForSphere"), useVoxelCenterForSphere);
         glUniform1i(glGetUniformLocation(shader, "visualizeRadius"), visualizeRadius);
+
+        // Quadric uniforms
+        glUniform1f(glGetUniformLocation(shader, "quadricA"), quadricA);
+        glUniform1f(glGetUniformLocation(shader, "quadricB"), quadricB);
+        glUniform1f(glGetUniformLocation(shader, "quadricC"), quadricC);
+        glUniform1f(glGetUniformLocation(shader, "quadricD"), quadricD);
+        glUniform1f(glGetUniformLocation(shader, "quadricE"), quadricE);
+        glUniform1f(glGetUniformLocation(shader, "quadricF"), quadricF);
+        glUniform1f(glGetUniformLocation(shader, "quadricG"), quadricG);
+        glUniform1f(glGetUniformLocation(shader, "quadricH"), quadricH);
+        glUniform1f(glGetUniformLocation(shader, "quadricI"), quadricI);
+        glUniform1f(glGetUniformLocation(shader, "quadricJ"), quadricJ);
+        glUniform3fv(glGetUniformLocation(shader, "quadricCenter"), 1, glm::value_ptr(quadricCenter));
 
         // Mouse picking uniforms
         glUniform2f(glGetUniformLocation(shader, "mousePixel"), (float)lastMouseX, (float)height - (float)lastMouseY);
@@ -357,7 +379,7 @@ void drawGui(float deltaTime)
         ImGui::Checkbox("Use Fitting", &useFitting);
         if (useFitting)
         {
-            const char *surfaceItems[] = {"Plane", "Sphere"};
+            const char *surfaceItems[] = {"Plane", "Sphere", "Quadric (Preset)", "Quadric (Fitted)"};
             ImGui::Combo("Surface Type", &surfaceType, surfaceItems, IM_ARRAYSIZE(surfaceItems));
 
             if (surfaceType == 1)
@@ -499,7 +521,343 @@ void drawGui(float deltaTime)
             {
                 ImGui::Text("Mode: Cubic (ring=%d)", neighborhood_ring_size);
             }
+
+            // Display fitted quadric coefficients if in quadric fitting mode
+            if (surfaceType == 3 && pickingInfo.clickedQuadricValid)
+            {
+                ImGui::Separator();
+                ImGui::Text("Quadric:");
+                ImGui::Text("A=%.3f, B=%.3f, C=%.3f",
+                            pickingInfo.clickedQuadricA, pickingInfo.clickedQuadricB, pickingInfo.clickedQuadricC);
+                ImGui::Text("D=%.3f, E=%.3f, F=%.3f",
+                            pickingInfo.clickedQuadricD, pickingInfo.clickedQuadricE, pickingInfo.clickedQuadricF);
+                ImGui::Text("G=%.3f, H=%.3f, I=%.3f",
+                            pickingInfo.clickedQuadricG, pickingInfo.clickedQuadricH, pickingInfo.clickedQuadricI);
+                ImGui::Text("J=%.3f", pickingInfo.clickedQuadricJ);
+            }
         }
+
+        ImGui::End();
+    }
+
+    // Quadric Parameters Window
+    if (surfaceType == 2)
+    {
+        ImGui::Begin("Quadric Parameters");
+
+        ImGui::Text("Quadric: Ax² + By² + Cz² + Dxy + Exz + Fyz + Gx + Hy + Iz + J = 0");
+        ImGui::Separator();
+
+        // Non-degenerate quadrics
+        ImGui::Text("Non-degenerate real quadric surfaces");
+        if (ImGui::Button("Ellipsoid"))
+        {
+            // x²/a² + y²/b² + z²/c² = 1
+            quadricA = 1.0f;
+            quadricB = 2.0f;
+            quadricC = 3.0f;
+            quadricD = 0.0f;
+            quadricE = 0.0f;
+            quadricF = 0.0f;
+            quadricG = 0.0f;
+            quadricH = 0.0f;
+            quadricI = 0.0f;
+            quadricJ = -100.0f;
+        }
+
+        if (ImGui::Button("Elliptic Paraboloid"))
+        {
+            // x²/a² + y²/b² - z = 0
+            quadricA = 1.0f;
+            quadricB = 2.0f;
+            quadricC = 0.0f;
+            quadricD = 0.0f;
+            quadricE = 0.0f;
+            quadricF = 0.0f;
+            quadricG = 0.0f;
+            quadricH = 0.0f;
+            quadricI = -10.0f;
+            quadricJ = 0.0f;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Hyperbolic Paraboloid"))
+        {
+            // x²/a² - y²/b² - z = 0 (saddle surface)
+            quadricA = 1.0f;
+            quadricB = -2.0f;
+            quadricC = 0.0f;
+            quadricD = 0.0f;
+            quadricE = 0.0f;
+            quadricF = 0.0f;
+            quadricG = 0.0f;
+            quadricH = 0.0f;
+            quadricI = -10.0f;
+            quadricJ = 0.0f;
+        }
+
+        if (ImGui::Button("Hyperboloid of one sheet"))
+        {
+            // x²/a² + y²/b² - z²/c² = 1
+            quadricA = 1.0f;
+            quadricB = 2.0f;
+            quadricC = -3.0f;
+            quadricD = 0.0f;
+            quadricE = 0.0f;
+            quadricF = 0.0f;
+            quadricG = 0.0f;
+            quadricH = 0.0f;
+            quadricI = 0.0f;
+            quadricJ = -100.0f;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Hyperboloid of two sheets"))
+        {
+            // x²/a² + y²/b² - z²/c² = -1
+            quadricA = 1.0f;
+            quadricB = 2.0f;
+            quadricC = -3.0f;
+            quadricD = 0.0f;
+            quadricE = 0.0f;
+            quadricF = 0.0f;
+            quadricG = 0.0f;
+            quadricH = 0.0f;
+            quadricI = 0.0f;
+            quadricJ = 100.0f;
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Degenerate real quadric surfaces");
+        if (ImGui::Button("Elliptic Cone"))
+        {
+            // x²/a² + y²/b² - z²/c² = 0
+            quadricA = 1.0f;
+            quadricB = 2.0f;
+            quadricC = -3.0f;
+            quadricD = 0.0f;
+            quadricE = 0.0f;
+            quadricF = 0.0f;
+            quadricG = 0.0f;
+            quadricH = 0.0f;
+            quadricI = 0.0f;
+            quadricJ = 0.0f;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Elliptic Cylinder"))
+        {
+            // x²/a² + y²/b² = 1
+            quadricA = 1.0f;
+            quadricB = 2.0f;
+            quadricC = 0.0f;
+            quadricD = 0.0f;
+            quadricE = 0.0f;
+            quadricF = 0.0f;
+            quadricG = 0.0f;
+            quadricH = 0.0f;
+            quadricI = 0.0f;
+            quadricJ = -100.0f;
+        }
+
+        if (ImGui::Button("Hyperbolic Cylinder"))
+        {
+            // x²/a² - y²/b² = 1
+            quadricA = 1.0f;
+            quadricB = -2.0f;
+            quadricC = 0.0f;
+            quadricD = 0.0f;
+            quadricE = 0.0f;
+            quadricF = 0.0f;
+            quadricG = 0.0f;
+            quadricH = 0.0f;
+            quadricI = 0.0f;
+            quadricJ = -100.0f;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Parabolic Cylinder"))
+        {
+            // x² + 2ay = 0 (a=5)
+            quadricA = 1.0f;
+            quadricB = 0.0f;
+            quadricC = 0.0f;
+            quadricD = 0.0f;
+            quadricE = 0.0f;
+            quadricF = 0.0f;
+            quadricG = 0.0f;
+            quadricH = 10.0f;
+            quadricI = 0.0f;
+            quadricJ = 0.0f;
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Quadrics of revolution");
+        if (ImGui::Button("Sphere"))
+        {
+            // x² + y² + z² = r² (r=10)
+            quadricA = 1.0f;
+            quadricB = 1.0f;
+            quadricC = 1.0f;
+            quadricD = 0.0f;
+            quadricE = 0.0f;
+            quadricF = 0.0f;
+            quadricG = 0.0f;
+            quadricH = 0.0f;
+            quadricI = 0.0f;
+            quadricJ = -100.0f;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Oblate Spheroid"))
+        {
+            // x²/a² + y²/a² + z²/b² = 1 (a > b, flattened sphere)
+            quadricA = 1.0f;
+            quadricB = 1.0f;
+            quadricC = 2.0f;
+            quadricD = 0.0f;
+            quadricE = 0.0f;
+            quadricF = 0.0f;
+            quadricG = 0.0f;
+            quadricH = 0.0f;
+            quadricI = 0.0f;
+            quadricJ = -100.0f;
+        }
+
+        if (ImGui::Button("Prolate Spheroid"))
+        {
+            // x²/a² + y²/a² + z²/b² = 1 (a < b, elongated sphere)
+            quadricA = 2.0f;
+            quadricB = 2.0f;
+            quadricC = 1.0f;
+            quadricD = 0.0f;
+            quadricE = 0.0f;
+            quadricF = 0.0f;
+            quadricG = 0.0f;
+            quadricH = 0.0f;
+            quadricI = 0.0f;
+            quadricJ = -100.0f;
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button("Circular Paraboloid"))
+        {
+            // x²/a² + y²/a² - z = 0
+            quadricA = 1.0f;
+            quadricB = 1.0f;
+            quadricC = 0.0f;
+            quadricD = 0.0f;
+            quadricE = 0.0f;
+            quadricF = 0.0f;
+            quadricG = 0.0f;
+            quadricH = 0.0f;
+            quadricI = -10.0f;
+            quadricJ = 0.0f;
+        }
+
+        if (ImGui::Button("Hyperboloid of revolution (1 sheet)"))
+        {
+            // x²/a² + y²/a² - z²/c² = 1
+            quadricA = 1.0f;
+            quadricB = 1.0f;
+            quadricC = -1.0f;
+            quadricD = 0.0f;
+            quadricE = 0.0f;
+            quadricF = 0.0f;
+            quadricG = 0.0f;
+            quadricH = 0.0f;
+            quadricI = 0.0f;
+            quadricJ = -100.0f;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Hyperboloid of revolution (2 sheets)"))
+        {
+            // x²/a² + y²/a² - z²/c² = -1
+            quadricA = 1.0f;
+            quadricB = 1.0f;
+            quadricC = -1.0f;
+            quadricD = 0.0f;
+            quadricE = 0.0f;
+            quadricF = 0.0f;
+            quadricG = 0.0f;
+            quadricH = 0.0f;
+            quadricI = 0.0f;
+            quadricJ = 100.0f;
+        }
+
+        if (ImGui::Button("Circular Cone"))
+        {
+            // x² + y² - z² = 0
+            quadricA = 1.0f;
+            quadricB = 1.0f;
+            quadricC = -1.0f;
+            quadricD = 0.0f;
+            quadricE = 0.0f;
+            quadricF = 0.0f;
+            quadricG = 0.0f;
+            quadricH = 0.0f;
+            quadricI = 0.0f;
+            quadricJ = 0.0f;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Circular Cylinder"))
+        {
+            // x² + y² = r²
+            quadricA = 1.0f;
+            quadricB = 1.0f;
+            quadricC = 0.0f;
+            quadricD = 0.0f;
+            quadricE = 0.0f;
+            quadricF = 0.0f;
+            quadricG = 0.0f;
+            quadricH = 0.0f;
+            quadricI = 0.0f;
+            quadricJ = -100.0f;
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Manual Parameters:");
+
+        // Add button to load fitted quadric if available
+        PickingData pickingInfo = readPickingData();
+        if (pickingInfo.clickedQuadricValid)
+        {
+            if (ImGui::Button("Load Fitted Quadric"))
+            {
+                quadricA = pickingInfo.clickedQuadricA;
+                quadricB = pickingInfo.clickedQuadricB;
+                quadricC = pickingInfo.clickedQuadricC;
+                quadricD = pickingInfo.clickedQuadricD;
+                quadricE = pickingInfo.clickedQuadricE;
+                quadricF = pickingInfo.clickedQuadricF;
+                quadricG = pickingInfo.clickedQuadricG;
+                quadricH = pickingInfo.clickedQuadricH;
+                quadricI = pickingInfo.clickedQuadricI;
+                quadricJ = pickingInfo.clickedQuadricJ;
+                quadricCenter = glm::vec3(0.0f); // Fitted coefficients are in world space
+            }
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Fitted quadric available");
+        }
+
+        ImGui::DragFloat("A (x²)", &quadricA, 0.1f, -100.0f, 100.0f);
+        ImGui::DragFloat("B (y²)", &quadricB, 0.1f, -100.0f, 100.0f);
+        ImGui::DragFloat("C (z²)", &quadricC, 0.1f, -100.0f, 100.0f);
+
+        ImGui::Separator();
+        ImGui::Text("Cross Terms:");
+        ImGui::DragFloat("D (xy)", &quadricD, 0.1f, -100.0f, 100.0f);
+        ImGui::DragFloat("E (xz)", &quadricE, 0.1f, -100.0f, 100.0f);
+        ImGui::DragFloat("F (yz)", &quadricF, 0.1f, -100.0f, 100.0f);
+
+        ImGui::Separator();
+        ImGui::Text("Linear Terms:");
+        ImGui::DragFloat("G (x)", &quadricG, 0.1f, -100.0f, 100.0f);
+        ImGui::DragFloat("H (y)", &quadricH, 0.1f, -100.0f, 100.0f);
+        ImGui::DragFloat("I (z)", &quadricI, 0.1f, -100.0f, 100.0f);
+
+        ImGui::Separator();
+        ImGui::Text("Constant Term:");
+        ImGui::DragFloat("J", &quadricJ, 1.0f, -1000.0f, 1000.0f);
+
+        ImGui::Separator();
+        ImGui::Text("Position:");
+        ImGui::DragFloat3("Center", glm::value_ptr(quadricCenter), 0.5f, 0.0f, (float)GRID_SIZE);
 
         ImGui::End();
     }

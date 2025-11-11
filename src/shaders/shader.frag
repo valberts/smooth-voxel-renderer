@@ -25,7 +25,13 @@ uniform float sphericalRadius;
 uniform bool useVoxelCenterForSphere;
 uniform bool visualizeRadius;
 uniform int falloffMode; // 0 = linear, 1 = gaussian
-uniform int surfaceType; // 0 = plane, 1 = sphere
+uniform int surfaceType; // 0 = plane, 1 = sphere, 2 = quadric
+
+// Quadric parameters
+uniform float quadricA, quadricB, quadricC;
+uniform float quadricD, quadricE, quadricF;
+uniform float quadricG, quadricH, quadricI, quadricJ;
+uniform vec3 quadricCenter;
 
 // Mouse picking
 uniform vec2 mousePixel; // Mouse position in screen coordinates
@@ -44,6 +50,18 @@ layout(std430, binding = 0) buffer PickingData {
     int clickedNeighborCount;
     int padding2[3];
     ivec4 clickedNeighbors[MAX_NEIGHBORS];
+    
+    // Hovered quadric coefficients (updated every frame when hovering)
+    float hoveredQuadricA, hoveredQuadricB, hoveredQuadricC;
+    float hoveredQuadricD, hoveredQuadricE, hoveredQuadricF;
+    float hoveredQuadricG, hoveredQuadricH, hoveredQuadricI, hoveredQuadricJ;
+    int hoveredQuadricValid;
+    
+    // Clicked quadric coefficients (only updated on click)
+    float clickedQuadricA, clickedQuadricB, clickedQuadricC;
+    float clickedQuadricD, clickedQuadricE, clickedQuadricF;
+    float clickedQuadricG, clickedQuadricH, clickedQuadricI, clickedQuadricJ;
+    int clickedQuadricValid;
 } pickingData;
 
 // Global arrays to avoid register pressure from multiple large local arrays
@@ -465,6 +483,164 @@ vec4 fitSphere(vec3 neighbors[MAX_NEIGHBORS], float weights[MAX_NEIGHBORS], int 
     return vec4(center, radius);
 }
 
+// Fit a general quadric surface: Ax² + By² + Cz² + Dxy + Exz + Fyz + Gx + Hy + Iz + J = 0
+// We normalize by setting J = -1, giving us 9 unknowns: A, B, C, D, E, F, G, H, I
+// Returns true if successful, outputs coefficients and the data center used
+bool fitQuadric(vec3 neighbors[MAX_NEIGHBORS], float weights[MAX_NEIGHBORS], int N,
+                out float A, out float B, out float C,
+                out float D, out float E, out float F,
+                out float G, out float H, out float I,
+                out vec3 dataCenter) {
+    // // Need at least 9 points for 9 unknowns
+    // if (N < 9) {
+    //     return false;
+    // }
+    
+    // Compute weighted center for numerical stability
+    dataCenter = vec3(0.0);
+    float totalWeight = 0.0;
+    for (int i = 0; i < N; ++i) {
+        dataCenter += weights[i] * neighbors[i];
+        totalWeight += weights[i];
+    }
+    dataCenter /= totalWeight;
+    
+    // Build the 9x9 system: M^T*M * [A,B,C,D,E,F,G,H,I]^T = M^T * b
+    // where b = [1,1,...,1]^T (since J = -1)
+    // Row for each point: [x², y², z², xy, xz, yz, x, y, z]
+    
+    // We'll store the 9x9 matrix as 3x3 blocks of mat3
+    mat3 M00 = mat3(0.0); // rows [0-2], cols [0-2]
+    mat3 M01 = mat3(0.0); // rows [0-2], cols [3-5]
+    mat3 M02 = mat3(0.0); // rows [0-2], cols [6-8]
+    mat3 M10 = mat3(0.0); // rows [3-5], cols [0-2]
+    mat3 M11 = mat3(0.0); // rows [3-5], cols [3-5]
+    mat3 M12 = mat3(0.0); // rows [3-5], cols [6-8]
+    mat3 M20 = mat3(0.0); // rows [6-8], cols [0-2]
+    mat3 M21 = mat3(0.0); // rows [6-8], cols [3-5]
+    mat3 M22 = mat3(0.0); // rows [6-8], cols [6-8]
+    
+    vec3 b0 = vec3(0.0); // b elements [0-2]
+    vec3 b1 = vec3(0.0); // b elements [3-5]
+    vec3 b2 = vec3(0.0); // b elements [6-8]
+    
+    // Build M^T*M and M^T*b
+    for (int i = 0; i < N; ++i) {
+        vec3 p = neighbors[i] - dataCenter; // Center the data
+        float w = weights[i];
+        
+        // Row vector: [x², y², z², xy, xz, yz, x, y, z]
+        float x = p.x, y = p.y, z = p.z;
+        vec3 r0 = vec3(x*x, y*y, z*z);
+        vec3 r1 = vec3(x*y, x*z, y*z);
+        vec3 r2 = vec3(x, y, z);
+        
+        // Accumulate M^T*M (symmetric matrix, so M[i][j] = M[j][i])
+        // Block [0-2, 0-2]
+        M00[0] += w * r0 * r0.x;
+        M00[1] += w * r0 * r0.y;
+        M00[2] += w * r0 * r0.z;
+        
+        // Block [0-2, 3-5]
+        M01[0] += w * r0 * r1.x;
+        M01[1] += w * r0 * r1.y;
+        M01[2] += w * r0 * r1.z;
+        
+        // Block [0-2, 6-8]
+        M02[0] += w * r0 * r2.x;
+        M02[1] += w * r0 * r2.y;
+        M02[2] += w * r0 * r2.z;
+        
+        // Block [3-5, 0-2] (symmetric)
+        M10[0] += w * r1 * r0.x;
+        M10[1] += w * r1 * r0.y;
+        M10[2] += w * r1 * r0.z;
+        
+        // Block [3-5, 3-5]
+        M11[0] += w * r1 * r1.x;
+        M11[1] += w * r1 * r1.y;
+        M11[2] += w * r1 * r1.z;
+        
+        // Block [3-5, 6-8]
+        M12[0] += w * r1 * r2.x;
+        M12[1] += w * r1 * r2.y;
+        M12[2] += w * r1 * r2.z;
+        
+        // Block [6-8, 0-2] (symmetric)
+        M20[0] += w * r2 * r0.x;
+        M20[1] += w * r2 * r0.y;
+        M20[2] += w * r2 * r0.z;
+        
+        // Block [6-8, 3-5] (symmetric)
+        M21[0] += w * r2 * r1.x;
+        M21[1] += w * r2 * r1.y;
+        M21[2] += w * r2 * r1.z;
+        
+        // Block [6-8, 6-8]
+        M22[0] += w * r2 * r2.x;
+        M22[1] += w * r2 * r2.y;
+        M22[2] += w * r2 * r2.z;
+        
+        // Accumulate M^T*b (b_i = 1 since J = -1)
+        b0 += w * r0;
+        b1 += w * r1;
+        b2 += w * r2;
+    }
+    
+    // Solve the 9x9 system using block Gaussian elimination
+    // We'll reduce it step by step
+    
+    // Step 1: Eliminate first block column
+    if (abs(determinant(M00)) < 1e-10) {
+        return false;
+    }
+    mat3 M00_inv = inverse(M00);
+    
+    // Update blocks: M11 -= M10 * M00^-1 * M01
+    mat3 M11_new = M11 - M10 * M00_inv * M01;
+    mat3 M12_new = M12 - M10 * M00_inv * M02;
+    vec3 b1_new = b1 - M10 * M00_inv * b0;
+    
+    // Update blocks: M21 -= M20 * M00^-1 * M01
+    mat3 M21_new = M21 - M20 * M00_inv * M01;
+    mat3 M22_new = M22 - M20 * M00_inv * M02;
+    vec3 b2_new = b2 - M20 * M00_inv * b0;
+    
+    // Step 2: Eliminate second block column from the reduced system
+    if (abs(determinant(M11_new)) < 1e-10) {
+        return false;
+    }
+    mat3 M11_inv = inverse(M11_new);
+    
+    // Final 3x3 system: M22_final * [G,H,I]^T = b2_final
+    mat3 M22_final = M22_new - M21_new * M11_inv * M12_new;
+    vec3 b2_final = b2_new - M21_new * M11_inv * b1_new;
+    
+    if (abs(determinant(M22_final)) < 1e-10) {
+        return false;
+    }
+    
+    // Solve for [G,H,I]
+    vec3 ghi = inverse(M22_final) * b2_final;
+    G = ghi.x;
+    H = ghi.y;
+    I = ghi.z;
+    
+    // Back-substitute for [D,E,F]
+    vec3 def = M11_inv * (b1_new - M12_new * ghi);
+    D = def.x;
+    E = def.y;
+    F = def.z;
+    
+    // Back-substitute for [A,B,C]
+    vec3 abc = M00_inv * (b0 - M01 * def - M02 * ghi);
+    A = abc.x;
+    B = abc.y;
+    C = abc.z;
+    
+    return true;
+}
+
 // https://www.scratchapixel.com/lessons/3d-basic-rendering/minimal-ray-tracer-rendering-simple-shapes/ray-sphere-intersection.html
 bool intersectSphere(vec3 ro, vec3 rd, vec3 center, float radius, out float t) {
     vec3 L = ro - center;
@@ -501,6 +677,84 @@ bool intersectSphere(vec3 ro, vec3 rd, vec3 center, float radius, out float t) {
     }
     
     return false;
+}
+
+// http://www.bmsc.washington.edu/people/merritt/graphics/quadrics.html
+// General quadric surface: Ax² + By² + Cz² + Dxy + Exz + Fyz + Gx + Hy + Iz + J = 0
+// Returns true if intersection found, outputs t and normal at intersection
+bool intersectQuadric(vec3 ro, vec3 rd, 
+                      float A, float B, float C, float D, float E, float F,
+                      float G, float H, float I, float J,
+                      out float t, out vec3 normal) {
+    // Ray: R(t) = ro + t*rd
+    // Substitute into quadric equation to get: Aq*t² + Bq*t + Cq = 0
+    
+    float xd = rd.x, yd = rd.y, zd = rd.z;
+    float xo = ro.x, yo = ro.y, zo = ro.z;
+    
+    // Compute coefficients of quadratic equation in t
+    float Aq = A*xd*xd + B*yd*yd + C*zd*zd + D*xd*yd + E*xd*zd + F*yd*zd;
+    
+    float Bq = 2.0*A*xo*xd + 2.0*B*yo*yd + 2.0*C*zo*zd 
+             + D*(xo*yd + yo*xd) + E*(xo*zd + zo*xd) + F*(yo*zd + zo*yd)
+             + G*xd + H*yd + I*zd;
+    
+    float Cq = A*xo*xo + B*yo*yo + C*zo*zo 
+             + D*xo*yo + E*xo*zo + F*yo*zo 
+             + G*xo + H*yo + I*zo + J;
+    
+    // Check for degenerate case (ray parallel to quadric)
+    if (abs(Aq) < 1e-6) {
+        // Linear equation: Bq*t + Cq = 0
+        if (abs(Bq) < 1e-6) {
+            return false; // No intersection
+        }
+        t = -Cq / Bq;
+        if (t <= 0.0) {
+            return false;
+        }
+    } else {
+        // Quadratic equation: solve for t
+        float discriminant = Bq*Bq - 4.0*Aq*Cq;
+        
+        if (discriminant < 0.0) {
+            return false; // No real intersection
+        }
+        
+        float sqrtDisc = sqrt(discriminant);
+        float t0 = (-Bq - sqrtDisc) / (2.0 * Aq);
+        float t1 = (-Bq + sqrtDisc) / (2.0 * Aq);
+        
+        // Choose closest positive t
+        if (t0 > 0.0) {
+            t = t0;
+        } else if (t1 > 0.0) {
+            t = t1;
+        } else {
+            return false; // Both intersections behind ray origin
+        }
+    }
+    
+    // Compute intersection point
+    vec3 intersection = ro + t * rd;
+    float xi = intersection.x;
+    float yi = intersection.y;
+    float zi = intersection.z;
+    
+    // Compute normal at intersection using partial derivatives
+    // Normal = ∇F = [∂F/∂x, ∂F/∂y, ∂F/∂z]
+    normal.x = 2.0*A*xi + D*yi + E*zi + G;
+    normal.y = 2.0*B*yi + D*xi + F*zi + H;
+    normal.z = 2.0*C*zi + E*xi + F*yi + I;
+    
+    normal = normalize(normal);
+    
+    // Make sure normal points toward ray origin
+    if (dot(normal, rd) > 0.0) {
+        normal = -normal;
+    }
+    
+    return true;
 }
 
 // https://www.scratchapixel.com/lessons/3d-basic-rendering/minimal-ray-tracer-rendering-simple-shapes/ray-plane-and-ray-disk-intersection.html
@@ -917,18 +1171,18 @@ bool traceSphere(ivec3 voxel, vec3 rayOrigin, vec3 rayDir) {
 
     if (visualizeRadius && !checkBounds) {
         updatePickingAtMouse(voxel, vec3(voxel) + 0.5);
-        float mapped = clamp(radius / 1000.0, 0.0, 1.0);
+        float mapped = clamp(radius / 10.0, 0.0, 1.0);
         FragColor = vec4(vec3(mapped), 1.0);
         return true;
     }
 
     if (radius == -1.0) {
         updatePickingAtMouse(voxel, vec3(voxel) + 0.5);
-        FragColor = vec4(1.0, 1.0, 0.0, 0.0); // invalid radius
+        FragColor = vec4(1.0, 1.0, 0.0, 1.0); // invalid radius
         return true;
     } else if (radius == -2.0) {
         updatePickingAtMouse(voxel, vec3(voxel) + 0.5);
-        FragColor = vec4(0.0, 1.0, 1.0, 0.0); // failed to fit
+        FragColor = vec4(0.0, 1.0, 1.0, 1.0); // failed to fit
         return true;
     }
 
@@ -962,6 +1216,126 @@ bool traceSphere(ivec3 voxel, vec3 rayOrigin, vec3 rayDir) {
     return false;
 }
 
+bool traceQuadric(ivec3 voxel, vec3 rayOrigin, vec3 rayDir) {
+    int neighborCount;
+    neighborCount = getNeighborsVoxel(voxel, neighborhoodRingSize, g_neighbors);
+
+    // Check if we have enough points (need 9 for general quadric)
+    if (neighborCount < 9) {
+        updatePickingAtMouse(voxel, vec3(voxel) + 0.5);
+        FragColor = vec4(1.0, 0.0, 0.0, 1.0); // not enough points
+        return true;
+    }
+
+    // Note: We don't check for coplanarity - a plane is a valid degenerate quadric!
+
+    // Initialize weights
+    for (int i = 0; i < neighborCount; i++) {
+        g_weights[i] = 1.0;
+    }
+
+    // Fit general quadric (includes rotation via D, E, F)
+    float A, B, C, D, E, F, G, H, I;
+    vec3 dataCenter;
+    bool success = fitQuadric(g_neighbors, g_weights, neighborCount, A, B, C, D, E, F, G, H, I, dataCenter);
+
+    if (!success) {
+        updatePickingAtMouse(voxel, vec3(voxel) + 0.5);
+        if (areCoplanar(neighborCount)) {
+            FragColor = vec4(1.0, 0.0, 0.0, 1.0); // not enough points
+            return true;
+        }
+        FragColor = vec4(0.0, 1.0, 1.0, 1.0); // failed to fit
+        return true;
+    }
+
+    // Transform the quadric coefficients back to world space
+    // The fitted quadric is: A*x'² + B*y'² + C*z'² + D*x'y' + E*x'z' + F*y'z' + G*x' + H*y' + I*z' - 1 = 0
+    // where (x',y',z') = (x,y,z) - dataCenter
+    // We need to express it in world coordinates
+    
+    // Let cx = dataCenter.x, cy = dataCenter.y, cz = dataCenter.z
+    // x' = x - cx, y' = y - cy, z' = z - cz
+    // 
+    // Expanding the cross terms:
+    // D*(x-cx)*(y-cy) = D*xy - D*cx*y - D*cy*x + D*cx*cy
+    // E*(x-cx)*(z-cz) = E*xz - E*cx*z - E*cz*x + E*cx*cz
+    // F*(y-cy)*(z-cz) = F*yz - F*cy*z - F*cz*y + F*cy*cz
+    //
+    // Collecting terms:
+    float cx = dataCenter.x, cy = dataCenter.y, cz = dataCenter.z;
+    
+    float A_world = A;
+    float B_world = B;
+    float C_world = C;
+    float D_world = D;
+    float E_world = E;
+    float F_world = F;
+    float G_world = G - 2.0*A*cx - D*cy - E*cz;
+    float H_world = H - 2.0*B*cy - D*cx - F*cz;
+    float I_world = I - 2.0*C*cz - E*cx - F*cy;
+    float J_world = A*cx*cx + B*cy*cy + C*cz*cz + D*cx*cy + E*cx*cz + F*cy*cz
+                    - G*cx - H*cy - I*cz - 1.0;
+
+    // Store fitted quadric coefficients in SSBO for GUI display
+    // Always update hovered quadric when hovering
+    if (distance(gl_FragCoord.xy, mousePixel) < 1.5) {
+        pickingData.hoveredQuadricA = A_world;
+        pickingData.hoveredQuadricB = B_world;
+        pickingData.hoveredQuadricC = C_world;
+        pickingData.hoveredQuadricD = D_world;
+        pickingData.hoveredQuadricE = E_world;
+        pickingData.hoveredQuadricF = F_world;
+        pickingData.hoveredQuadricG = G_world;
+        pickingData.hoveredQuadricH = H_world;
+        pickingData.hoveredQuadricI = I_world;
+        pickingData.hoveredQuadricJ = J_world;
+        pickingData.hoveredQuadricValid = 1;
+    }
+    
+    // Copy to clicked quadric when user clicks
+    if (shouldUpdateClicked && pickingData.hoveredQuadricValid > 0) {
+        pickingData.clickedQuadricA = pickingData.hoveredQuadricA;
+        pickingData.clickedQuadricB = pickingData.hoveredQuadricB;
+        pickingData.clickedQuadricC = pickingData.hoveredQuadricC;
+        pickingData.clickedQuadricD = pickingData.hoveredQuadricD;
+        pickingData.clickedQuadricE = pickingData.hoveredQuadricE;
+        pickingData.clickedQuadricF = pickingData.hoveredQuadricF;
+        pickingData.clickedQuadricG = pickingData.hoveredQuadricG;
+        pickingData.clickedQuadricH = pickingData.hoveredQuadricH;
+        pickingData.clickedQuadricI = pickingData.hoveredQuadricI;
+        pickingData.clickedQuadricJ = pickingData.hoveredQuadricJ;
+        pickingData.clickedQuadricValid = 1;
+    }
+
+    // Intersect ray with the fitted quadric
+    float t_quadric;
+    vec3 normal;
+    if (intersectQuadric(rayOrigin, rayDir,
+                        A_world, B_world, C_world, D_world, E_world, F_world,
+                        G_world, H_world, I_world, J_world,
+                        t_quadric, normal)) {
+        vec3 intersection = rayOrigin + rayDir * t_quadric;
+        setFragmentDepth(intersection);
+        
+        ivec3 hit_voxel = ivec3(floor(intersection));
+        
+        if (checkBounds) {
+            if (all(equal(hit_voxel, voxel))) {
+                updatePickingAtMouse(voxel, vec3(voxel) + 0.5);
+                renderSurface(normal, intersection);
+                return true;
+            }
+        } else {
+            updatePickingAtMouse(voxel, vec3(voxel) + 0.5);
+            renderSurface(normal, intersection);
+            return true;
+        }
+    }
+    
+    return false;
+}
+
 void main()
 {
     // Ray generation
@@ -970,6 +1344,34 @@ void main()
     vec4 target = invProjection * vec4(x, y, 1.0, 1.0);
     vec3 rayDir = vec3(invView * vec4(normalize(vec3(target) / target.w), 0.0));
     vec3 rayOrigin = cameraPos;
+    
+    // === QUADRIC MODE: Render hardcoded quadric (not from voxel data) ===
+    if (surfaceType == 2) {
+        // Translate ray to quadric's local space
+        vec3 localRayOrigin = rayOrigin - quadricCenter;
+        
+        float t_quadric;
+        vec3 quadricNormal;
+        
+        if (intersectQuadric(localRayOrigin, rayDir,
+                            quadricA, quadricB, quadricC, quadricD, quadricE, quadricF,
+                            quadricG, quadricH, quadricI, quadricJ,
+                            t_quadric, quadricNormal)) {
+            vec3 intersection = rayOrigin + rayDir * t_quadric;
+            
+            // Check if intersection is within grid bounds
+            if (intersection.x >= 0.0 && intersection.x <= float(gridSize) &&
+                intersection.y >= 0.0 && intersection.y <= float(gridSize) &&
+                intersection.z >= 0.0 && intersection.z <= float(gridSize)) {
+                renderSurface(quadricNormal, intersection);
+                return;
+            }
+        }
+        
+        // No intersection or outside bounds - render background
+        FragColor = vec4(0.1, 0.1, 0.1, 1.0);
+        return;
+    }
 
     // Bounding box intersection
     vec3 gridMin = vec3(0.0);
@@ -1019,6 +1421,11 @@ void main()
                 // === SPHERE FITTING MODE ===
                 if (surfaceType == 1) {
                     if (traceSphere(voxel, rayOrigin, rayDir)) {
+                        return;
+                    }
+                
+                } else if (surfaceType == 3) { // === QUADRIC FITTING MODE ===
+                    if (traceQuadric(voxel, rayOrigin, rayDir)) {
                         return;
                     }
                     

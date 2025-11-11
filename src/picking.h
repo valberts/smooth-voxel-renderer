@@ -23,6 +23,18 @@ struct PickingData
     int clickedNeighborCount;
     int padding2[3];                  // Align to 16 bytes
     glm::ivec4 clickedNeighbors[343]; // MAX_NEIGHBORS
+
+    // Hovered quadric coefficients (updated every frame when hovering)
+    float hoveredQuadricA, hoveredQuadricB, hoveredQuadricC;
+    float hoveredQuadricD, hoveredQuadricE, hoveredQuadricF;
+    float hoveredQuadricG, hoveredQuadricH, hoveredQuadricI, hoveredQuadricJ;
+    int hoveredQuadricValid;
+
+    // Clicked quadric coefficients (only updated on click)
+    float clickedQuadricA, clickedQuadricB, clickedQuadricC;
+    float clickedQuadricD, clickedQuadricE, clickedQuadricF;
+    float clickedQuadricG, clickedQuadricH, clickedQuadricI, clickedQuadricJ;
+    int clickedQuadricValid;
 };
 
 // Setup/cleanup
@@ -33,8 +45,8 @@ void cleanupPickingSSBO();
 void updateMousePosition(int mouseX, int mouseY, int windowWidth, int windowHeight);
 
 // Mouse callbacks
-void mouse_callback(GLFWwindow* window, double xpos, double ypos);
-void mouse_button_callback(GLFWwindow* window, int button, int action, int mods);
+void mouse_callback(GLFWwindow *window, double xpos, double ypos);
+void mouse_button_callback(GLFWwindow *window, int button, int action, int mods);
 
 // Optional: read back picking data for debugging/UI
 PickingData readPickingData();
