@@ -1,6 +1,9 @@
 #include "config.h"
 #include "picking.h"
 
+// TODO: fix boundary condition
+// TODO: fix quadric parameter scaling
+
 // --- globals ---
 unsigned int VAO, VBO;
 unsigned int wireframeVAO, wireframeVBO;
@@ -13,6 +16,8 @@ unsigned int sdfNormalsTexture;
 
 bool useFitting = 1;
 bool checkBounds = 1;
+float boundsTolerance = 0.0f;  // voxel units
+bool usePlaneFallback = false; // Fallback to plane fitting when quadric is nearly planar
 int k_neighbors = 64;
 int neighborhood_ring_size = 1;
 float sphereRadius = 1.0f;
@@ -30,8 +35,8 @@ bool usePhongLighting = false;
 
 // Distance weighting variables
 bool useDistanceWeighting = false;
-float distanceWeightMultiplier = 3.0f;
-int falloffMode = 0; // 0 = linear, 1 = gaussian
+float distanceWeightMultiplier = 3.0f; // lower value = weight decays more quickly, higher value = weights decay more slowly (smoother fit)
+int falloffMode = 0;                   // 0 = linear, 1 = gaussian
 
 // Surface type
 int surfaceType = 0; // 0 = plane, 1 = sphere, 2 = quadric (preset), 3 = quadric (fitted)
@@ -226,6 +231,8 @@ int main()
         glUniform3fv(glGetUniformLocation(shader, "cameraPos"), 1, glm::value_ptr(camera.Position));
         glUniform1i(glGetUniformLocation(shader, "useFitting"), useFitting);
         glUniform1i(glGetUniformLocation(shader, "checkBounds"), checkBounds);
+        glUniform1f(glGetUniformLocation(shader, "boundsTolerance"), boundsTolerance);
+        glUniform1i(glGetUniformLocation(shader, "usePlaneFallback"), usePlaneFallback);
         glUniform1i(glGetUniformLocation(shader, "neighborhoodRingSize"), neighborhood_ring_size);
         glUniform1i(glGetUniformLocation(shader, "gridSize"), GRID_SIZE);
         glUniform1i(glGetUniformLocation(shader, "usePhongLighting"), usePhongLighting);
@@ -408,7 +415,30 @@ void drawGui(float deltaTime)
             }
         }
         ImGui::Checkbox("Check Bounds", &checkBounds);
+        if (checkBounds)
+        {
+            ImGui::SliderFloat("Bounds Tolerance", &boundsTolerance, 0.0f, 0.5f, "%.2f");
+            ImGui::SameLine();
+            if (ImGui::Button("?##boundsTolerance"))
+            {
+                ImGui::SetTooltip("Tolerance for accepting intersections near voxel boundaries.\n"
+                                  "0.0 = strict (only inside voxel)\n"
+                                  "0.1 = small tolerance (recommended)\n"
+                                  "0.5 = loose (half voxel outside allowed)");
+            }
+        }
         ImGui::Checkbox("Use Phong Lighting", &usePhongLighting);
+
+        // Plane fallback option (for quadric fitting)
+        if (surfaceType == 3)
+        {
+            ImGui::Checkbox("Use Plane Fallback", &usePlaneFallback);
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("When quadric fitting fails or produces nearly planar results,\n"
+                                  "automatically fall back to plane fitting instead of showing errors.");
+            }
+        }
 
         ImGui::Separator();
 

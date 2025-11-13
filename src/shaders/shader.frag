@@ -12,6 +12,8 @@ uniform mat4 view;
 uniform vec3 cameraPos;
 uniform int neighborhoodRingSize; // 1=3x3, 2=5x5, 3=7x7
 uniform bool checkBounds;
+uniform float boundsTolerance; // Tolerance for bounds checking (voxel units)
+uniform bool usePlaneFallback; // Fallback to plane fitting when quadric is nearly planar
 uniform int gridSize;
 uniform bool usePhongLighting;
 uniform bool useDistanceWeighting;
@@ -67,6 +69,14 @@ layout(std430, binding = 0) buffer PickingData {
 // Global arrays to avoid register pressure from multiple large local arrays
 vec3 g_neighbors[MAX_NEIGHBORS];
 float g_weights[MAX_NEIGHBORS];
+
+// Check if intersection point is within voxel bounds with tolerance
+bool isWithinBounds(vec3 intersection, ivec3 voxel) {
+    vec3 localPos = intersection - vec3(voxel);
+    // Accept if within voxel or slightly outside by boundsTolerance
+    return all(greaterThanEqual(localPos, vec3(-boundsTolerance))) && 
+           all(lessThan(localPos, vec3(1.0 + boundsTolerance)));
+}
 
 // seperable 1D gaussian: G(x) = exp(-x^2 / (2*sigma^2))
 float computeGaussian1D(float offset, float sigma) {
@@ -1095,11 +1105,10 @@ bool tracePlaneRayCentric(ivec3 voxel, vec3 rayOrigin, vec3 rayDir, vec3 tMax, v
     
     if (hit) {
         vec3 intersectionPoint = rayOrigin + rayDir * planeT;
-        ivec3 voxelCoords = ivec3(floor(intersectionPoint));
 
         // Check if intersection is in the current voxel (if bounds checking is enabled)
         if (checkBounds) {
-            if (all(equal(voxelCoords, voxel))) {
+            if (isWithinBounds(intersectionPoint, voxel)) {
                 updatePickingAtMouse(voxel, rayOrigin, rayDir, tMax, deltaT);
                 renderSurface(planeNormal, intersectionPoint);
                 return true;
@@ -1151,9 +1160,16 @@ bool areCoplanar(int count) {
     return true; // coplanar, no points were outside plane
 }
 
-bool traceSphere(ivec3 voxel, vec3 rayOrigin, vec3 rayDir) {
+bool traceSphere(ivec3 voxel, vec3 rayOrigin, vec3 rayDir, vec3 tMax, vec3 deltaT) {
     int neighborCount;
-    neighborCount = getNeighborsVoxel(voxel, neighborhoodRingSize, g_neighbors);
+    
+    // Get neighbors
+    if (useSphericalNeighborhood == 1) {
+        vec3 samplePoint = findSamplePoint(voxel, rayOrigin, rayDir, tMax, deltaT);
+        neighborCount = getNeighborsSpherical(samplePoint, sphericalRadius, g_neighbors);
+    } else {
+        neighborCount = getNeighborsVoxel(voxel, neighborhoodRingSize, g_neighbors);
+    }
 
     if (areCoplanar(neighborCount)) {
         updatePickingAtMouse(voxel, vec3(voxel) + 0.5);
@@ -1161,8 +1177,17 @@ bool traceSphere(ivec3 voxel, vec3 rayOrigin, vec3 rayDir) {
         return true;
     }
 
-    for (int i = 0; i < neighborCount; i++) {
-        g_weights[i] = 1.0;
+    // Initialize weights (ray-centric distance weighting)
+    if (useDistanceWeighting) {
+        float effectiveRingSize = (useSphericalNeighborhood == 1) ? sphericalRadius : float(neighborhoodRingSize);
+        int ringSize = int(effectiveRingSize);
+        for (int i = 0; i < neighborCount; i++) {
+            g_weights[i] = computeDistanceWeight(g_neighbors[i], rayOrigin, rayDir, ringSize);
+        }
+    } else {
+        for (int i = 0; i < neighborCount; i++) {
+            g_weights[i] = 1.0;
+        }
     }
 
     vec4 sphere = fitSphere(g_neighbors, g_weights, neighborCount);
@@ -1192,17 +1217,15 @@ bool traceSphere(ivec3 voxel, vec3 rayOrigin, vec3 rayDir) {
 
         vec3 normal = normalize(intersection - sphere.xyz);
         setFragmentDepth(intersection);
-
-        ivec3 hit_voxel = ivec3(floor(intersection));
                 
         if (checkBounds) {
-            if (all(equal(hit_voxel, voxel))) {
-            if (visualizeRadius) {
-                updatePickingAtMouse(voxel, vec3(voxel) + 0.5);
-                float mapped = clamp(radius / 10.0, 0.0, 1.0);
-                FragColor = vec4(vec3(mapped), 1.0);
-                return true;
-            }
+            if (isWithinBounds(intersection, voxel)) {
+                if (visualizeRadius) {
+                    updatePickingAtMouse(voxel, vec3(voxel) + 0.5);
+                    float mapped = clamp(radius / 10.0, 0.0, 1.0);
+                    FragColor = vec4(vec3(mapped), 1.0);
+                    return true;
+                }
                 updatePickingAtMouse(voxel, vec3(voxel) + 0.5);
                 renderSurface(normal, intersection);
                 return true;
@@ -1216,9 +1239,16 @@ bool traceSphere(ivec3 voxel, vec3 rayOrigin, vec3 rayDir) {
     return false;
 }
 
-bool traceQuadric(ivec3 voxel, vec3 rayOrigin, vec3 rayDir) {
+bool traceQuadric(ivec3 voxel, vec3 rayOrigin, vec3 rayDir, vec3 tMax, vec3 deltaT) {
     int neighborCount;
-    neighborCount = getNeighborsVoxel(voxel, neighborhoodRingSize, g_neighbors);
+    
+    // Get neighbors
+    if (useSphericalNeighborhood == 1) {
+        vec3 samplePoint = findSamplePoint(voxel, rayOrigin, rayDir, tMax, deltaT);
+        neighborCount = getNeighborsSpherical(samplePoint, sphericalRadius, g_neighbors);
+    } else {
+        neighborCount = getNeighborsVoxel(voxel, neighborhoodRingSize, g_neighbors);
+    }
 
     // Check if we have enough points (need 9 for general quadric)
     if (neighborCount < 9) {
@@ -1227,11 +1257,19 @@ bool traceQuadric(ivec3 voxel, vec3 rayOrigin, vec3 rayDir) {
         return true;
     }
 
-    // Note: We don't check for coplanarity - a plane is a valid degenerate quadric!
+    // plane is degenerate quadric, dont check for coplanar
 
-    // Initialize weights
-    for (int i = 0; i < neighborCount; i++) {
-        g_weights[i] = 1.0;
+    // Initialize weights (ray-centric distance weighting)
+    if (useDistanceWeighting) {
+        float effectiveRingSize = (useSphericalNeighborhood == 1) ? sphericalRadius : float(neighborhoodRingSize);
+        int ringSize = int(effectiveRingSize);
+        for (int i = 0; i < neighborCount; i++) {
+            g_weights[i] = computeDistanceWeight(g_neighbors[i], rayOrigin, rayDir, ringSize);
+        }
+    } else {
+        for (int i = 0; i < neighborCount; i++) {
+            g_weights[i] = 1.0;
+        }
     }
 
     // Fit general quadric (includes rotation via D, E, F)
@@ -1240,13 +1278,26 @@ bool traceQuadric(ivec3 voxel, vec3 rayOrigin, vec3 rayDir) {
     bool success = fitQuadric(g_neighbors, g_weights, neighborCount, A, B, C, D, E, F, G, H, I, dataCenter);
 
     if (!success) {
-        updatePickingAtMouse(voxel, vec3(voxel) + 0.5);
-        if (areCoplanar(neighborCount)) {
-            FragColor = vec4(1.0, 0.0, 0.0, 1.0); // not enough points
+        if (usePlaneFallback) {
+            // Fitting failed - fall back to plane fitting
+            return tracePlaneRayCentric(voxel, rayOrigin, rayDir, tMax, deltaT);
+        } else {
+            updatePickingAtMouse(voxel, vec3(voxel) + 0.5);
+            FragColor = vec4(0.0, 1.0, 1.0, 1.0); // failed to fit
             return true;
         }
-        FragColor = vec4(0.0, 1.0, 1.0, 1.0); // failed to fit
-        return true;
+    }
+    
+    // Check if fitted quadric is nearly planar (degenerate case)
+    if (usePlaneFallback) {
+        // If all curvature terms are very small, it's essentially a plane
+        float curvatureSum = abs(A) + abs(B) + abs(C) + abs(D) + abs(E) + abs(F);
+        float linearSum = abs(G) + abs(H) + abs(I);
+        
+        // If curvature is negligible compared to linear terms, use plane fitting instead
+        if (curvatureSum < 0.01 * linearSum || curvatureSum < 1e-6) {
+            return tracePlaneRayCentric(voxel, rayOrigin, rayDir, tMax, deltaT);
+        }
     }
 
     // Transform the quadric coefficients back to world space
@@ -1318,10 +1369,8 @@ bool traceQuadric(ivec3 voxel, vec3 rayOrigin, vec3 rayDir) {
         vec3 intersection = rayOrigin + rayDir * t_quadric;
         setFragmentDepth(intersection);
         
-        ivec3 hit_voxel = ivec3(floor(intersection));
-        
         if (checkBounds) {
-            if (all(equal(hit_voxel, voxel))) {
+            if (isWithinBounds(intersection, voxel)) {
                 updatePickingAtMouse(voxel, vec3(voxel) + 0.5);
                 renderSurface(normal, intersection);
                 return true;
@@ -1420,12 +1469,12 @@ void main()
             if (useFitting) {
                 // === SPHERE FITTING MODE ===
                 if (surfaceType == 1) {
-                    if (traceSphere(voxel, rayOrigin, rayDir)) {
+                    if (traceSphere(voxel, rayOrigin, rayDir, tMax, deltaT)) {
                         return;
                     }
                 
                 } else if (surfaceType == 3) { // === QUADRIC FITTING MODE ===
-                    if (traceQuadric(voxel, rayOrigin, rayDir)) {
+                    if (traceQuadric(voxel, rayOrigin, rayDir, tMax, deltaT)) {
                         return;
                     }
                     

@@ -10,7 +10,6 @@ double lastMouseX = 0.0;
 double lastMouseY = 0.0;
 bool hasClickedVoxel = false;
 
-// Screen dimensions (for coordinate conversion)
 static int screenWidth = 0;
 static int screenHeight = 0;
 
@@ -82,15 +81,18 @@ void mouse_button_callback(GLFWwindow *window, int button, int action, int mods)
 }
 
 // Get the currently hovered voxel coordinates (returns ivec3(-1) if none)
-glm::ivec3 getHoveredVoxel() {
+glm::ivec3 getHoveredVoxel()
+{
     PickingData data = readPickingData();
-    if (data.hoveredVoxel.w > 0) {
+    if (data.hoveredVoxel.w > 0)
+    {
         return glm::ivec3(data.hoveredVoxel.x, data.hoveredVoxel.y, data.hoveredVoxel.z);
     }
     return glm::ivec3(-1, -1, -1);
 }
 
-PickingData readPickingData() {
+PickingData readPickingData()
+{
     PickingData data;
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, pickingSSBO);
     glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(PickingData), &data);

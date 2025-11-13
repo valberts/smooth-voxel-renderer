@@ -11,7 +11,7 @@ extern double lastMouseX;
 extern double lastMouseY;
 extern bool hasClickedVoxel;
 
-// GPU picking data structure (matches shader layout)
+// GPU picking data structure
 struct PickingData
 {
     glm::ivec4 hoveredVoxel; // xyz = voxel coords, w = valid flag
