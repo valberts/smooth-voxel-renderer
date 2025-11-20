@@ -35,8 +35,9 @@ bool usePhongLighting = false;
 
 // Distance weighting variables
 bool useDistanceWeighting = false;
-float distanceWeightMultiplier = 3.0f; // lower value = weight decays more quickly, higher value = weights decay more slowly (smoother fit)
-int falloffMode = 0;                   // 0 = linear, 1 = gaussian
+int falloffMode = 0;         // 0 = linear, 1 = gaussian
+int distanceMetric = 0;      // 0 = Chebyshev (L-infinity), 1 = Euclidean (L2)
+float minEdgeWeight = 0.05f; // minimum weight for voxels at the edge of the neighborhood
 
 // Surface type
 int surfaceType = 0; // 0 = plane, 1 = sphere, 2 = quadric (preset), 3 = quadric (fitted)
@@ -58,6 +59,8 @@ int voxelCentricMaxIterations = 16;
 bool useSphericalNeighborhood = false;
 float sphericalRadius = 1.5f;
 bool useVoxelCenterForSphere = true;
+bool useOverlappingNeighborhoods = false; // Center neighborhoods at ray intersection instead of voxel center
+bool useSoftNeighborhoodBoundary = false; // Apply partial weight for voxels near radius boundary
 
 // --- camera ---
 Camera camera(glm::vec3(GRID_SIZE * 1.5f, GRID_SIZE * 1.5f, GRID_SIZE * 1.5f));
@@ -237,8 +240,9 @@ int main()
         glUniform1i(glGetUniformLocation(shader, "gridSize"), GRID_SIZE);
         glUniform1i(glGetUniformLocation(shader, "usePhongLighting"), usePhongLighting);
         glUniform1i(glGetUniformLocation(shader, "useDistanceWeighting"), useDistanceWeighting);
-        glUniform1f(glGetUniformLocation(shader, "distanceWeightMultiplier"), distanceWeightMultiplier);
         glUniform1i(glGetUniformLocation(shader, "falloffMode"), falloffMode);
+        glUniform1i(glGetUniformLocation(shader, "distanceMetric"), distanceMetric);
+        glUniform1f(glGetUniformLocation(shader, "minEdgeWeight"), minEdgeWeight);
         glUniform1i(glGetUniformLocation(shader, "surfaceType"), surfaceType);
         glUniform1i(glGetUniformLocation(shader, "useVoxelCentricWeighting"), useVoxelCentricWeighting);
         glUniform1f(glGetUniformLocation(shader, "voxelCentricStepSize"), voxelCentricStepSize);
@@ -247,6 +251,8 @@ int main()
         glUniform1i(glGetUniformLocation(shader, "useSphericalNeighborhood"), useSphericalNeighborhood);
         glUniform1f(glGetUniformLocation(shader, "sphericalRadius"), sphericalRadius);
         glUniform1i(glGetUniformLocation(shader, "useVoxelCenterForSphere"), useVoxelCenterForSphere);
+        glUniform1i(glGetUniformLocation(shader, "useOverlappingNeighborhoods"), useOverlappingNeighborhoods);
+        glUniform1i(glGetUniformLocation(shader, "useSoftNeighborhoodBoundary"), useSoftNeighborhoodBoundary);
         glUniform1i(glGetUniformLocation(shader, "visualizeRadius"), visualizeRadius);
 
         // Quadric uniforms
@@ -395,10 +401,6 @@ void drawGui(float deltaTime)
             }
 
             ImGui::Checkbox("Use Ray-Centric Weighting", &useDistanceWeighting);
-            if (useDistanceWeighting)
-            {
-                ImGui::InputFloat("Distance Weight Multiplier", &distanceWeightMultiplier, 0.1f, 1.0f, "%.2f");
-            }
 
             ImGui::Checkbox("Use Voxel-Centric Weighting", &useVoxelCentricWeighting);
             if (useVoxelCentricWeighting)
@@ -412,6 +414,34 @@ void drawGui(float deltaTime)
             {
                 const char *falloffItems[] = {"Linear", "Gaussian"};
                 ImGui::Combo("Falloff Mode", &falloffMode, falloffItems, IM_ARRAYSIZE(falloffItems));
+
+                const char *distanceItems[] = {"Chebyshev (Box)", "Euclidean (Sphere)"};
+                ImGui::Combo("Distance Metric", &distanceMetric, distanceItems, IM_ARRAYSIZE(distanceItems));
+                ImGui::SameLine();
+                if (ImGui::Button("?##distanceMetric"))
+                {
+                    ImGui::SetTooltip("Chebyshev: Box-shaped, all boundary voxels equal distance\n"
+                                      "Euclidean: Sphere-shaped, corner voxels farther than faces\n"
+                                      "Chebyshev better for cubic neighborhoods, Euclidean for spherical");
+                }
+
+                ImGui::SliderFloat("Min Edge Weight", &minEdgeWeight, 0.0f, 1.0f, "%.3f");
+                ImGui::SameLine();
+                if (ImGui::Button("?##minEdgeWeight"))
+                {
+                    if (falloffMode == 0)
+                    {
+                        ImGui::SetTooltip("Weight for voxels at the edge of the neighborhood.\n"
+                                          "1.0 = center voxel weight, 0.0 = edge voxels ignored\n"
+                                          "Linear interpolation from center (1.0) to edge (this value)");
+                    }
+                    else
+                    {
+                        ImGui::SetTooltip("Weight for voxels at the edge of the neighborhood.\n"
+                                          "1.0 = center voxel weight, 0.0 = edge voxels ignored\n"
+                                          "Gaussian falloff tuned so edge voxels = this value");
+                    }
+                }
             }
         }
         ImGui::Checkbox("Check Bounds", &checkBounds);
@@ -433,11 +463,6 @@ void drawGui(float deltaTime)
         if (surfaceType == 3)
         {
             ImGui::Checkbox("Use Plane Fallback", &usePlaneFallback);
-            if (ImGui::IsItemHovered())
-            {
-                ImGui::SetTooltip("When quadric fitting fails or produces nearly planar results,\n"
-                                  "automatically fall back to plane fitting instead of showing errors.");
-            }
         }
 
         ImGui::Separator();
@@ -521,6 +546,30 @@ void drawGui(float deltaTime)
         else
         {
             ImGui::SliderInt("Ring Size", &neighborhood_ring_size, 1, 3);
+        }
+
+        ImGui::Checkbox("Use Overlapping Neighborhoods", &useOverlappingNeighborhoods);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("Center neighborhoods at ray intersection point instead of voxel center.\n"
+                              "- Each pixel gets its own neighborhood (per-pixel vs per-voxel)\n"
+                              "- Creates smooth transitions between adjacent surfaces\n"
+                              "- Works with both cubic and spherical neighborhoods");
+        }
+
+        ImGui::Checkbox("Use Soft Neighborhood Boundary", &useSoftNeighborhoodBoundary);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("Apply distance-based weight multiplier based on voxel distance from neighborhood center.\n"
+                              "- Voxel center at neighborhood center: 100%% weight multiplier\n"
+                              "- Voxel center at neighborhood radius: 0%% weight multiplier\n"
+                              "- Linear gradient based on distance between them\n"
+                              "- Multiplied with existing weights (uniform/ray-centric/voxel-centric)\n"
+                              "Example: if radius=2.0 and voxel is 1.0 away from center, multiplier=0.5");
         }
 
         ImGui::Separator();

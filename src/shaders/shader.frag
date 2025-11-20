@@ -17,7 +17,8 @@ uniform bool usePlaneFallback; // Fallback to plane fitting when quadric is near
 uniform int gridSize;
 uniform bool usePhongLighting;
 uniform bool useDistanceWeighting;
-uniform float distanceWeightMultiplier;
+uniform int distanceMetric; // 0 = Chebyshev (L-infinity), 1 = Euclidean (L2)
+uniform float minEdgeWeight;
 uniform bool useVoxelCentricWeighting;
 uniform float voxelCentricStepSize;
 uniform float voxelCentricEpsilon;
@@ -25,6 +26,8 @@ uniform int voxelCentricMaxIterations;
 uniform int useSphericalNeighborhood;
 uniform float sphericalRadius;
 uniform bool useVoxelCenterForSphere;
+uniform bool useOverlappingNeighborhoods; // Center neighborhoods at ray intersection point instead of voxel center
+uniform bool useSoftNeighborhoodBoundary; // Apply distance-based weight multiplier at neighborhood boundary (1.0 at center, 0.0 at radius)
 uniform bool visualizeRadius;
 uniform int falloffMode; // 0 = linear, 1 = gaussian
 uniform int surfaceType; // 0 = plane, 1 = sphere, 2 = quadric
@@ -78,6 +81,29 @@ bool isWithinBounds(vec3 intersection, ivec3 voxel) {
            all(lessThan(localPos, vec3(1.0 + boundsTolerance)));
 }
 
+// Compute distance based on selected metric
+float computeDistance(vec3 offset) {
+    vec3 absOffset = abs(offset);
+    if (distanceMetric == 0) {
+        // Chebyshev distance (L-infinity norm): max coordinate
+        return max(max(absOffset.x, absOffset.y), absOffset.z);
+    } else {
+        // Euclidean distance (L2 norm)
+        return length(offset);
+    }
+}
+
+// Get max distance for neighborhood based on metric
+float getMaxDistance(int ringSize) {
+    if (distanceMetric == 0) {
+        // Chebyshev: max coordinate is ringSize
+        return float(ringSize);
+    } else {
+        // Euclidean: diagonal distance sqrt(3) * ringSize
+        return sqrt(3.0) * float(ringSize);
+    }
+}
+
 // seperable 1D gaussian: G(x) = exp(-x^2 / (2*sigma^2))
 float computeGaussian1D(float offset, float sigma) {
     return exp(-(offset * offset) / (2.0 * sigma * sigma));
@@ -95,22 +121,33 @@ float computeGaussianDistanceFalloff(vec3 point, vec3 rayOrigin, vec3 rayDirecti
     vec3 projection = dot(toPoint, rayDirection) * rayDirection;
     vec3 perpendicular = toPoint - projection;
     
-    // linear falloff has maxDist = sqrt(distanceWeightMultiplier) * ringSize
-    // for Gaussian, we set sigma = maxDist / 2.5 so that at maxDist, weight ≈ 0.01
-    float maxDist = sqrt(distanceWeightMultiplier) * float(ringSize);
-    float sigma = maxDist / 2.5; // 2.5*sigma, gaussian ≈ 0.01
+    // Compute distance based on selected metric
+    float dist = computeDistance(perpendicular);
+    float maxDist = getMaxDistance(ringSize);
     
-    return computeGaussianConvolutionWeight(perpendicular, sigma);
+    // Compute sigma so that at maxDist, gaussian = minEdgeWeight
+    // G(maxDist) = exp(-(maxDist²) / (2*sigma²)) = minEdgeWeight
+    // sigma = maxDist / sqrt(-2 * ln(minEdgeWeight))
+    float sigma = (minEdgeWeight > 0.0001) ? (maxDist / sqrt(-2.0 * log(minEdgeWeight))) : (maxDist / 2.5);
+    
+    // Gaussian falloff
+    return exp(-(dist * dist) / (2.0 * sigma * sigma));
 }
 
 float computeGaussianVoxelCentricFalloff(vec3 neighborPos, vec3 currentRayPos, int ringSize) {
     vec3 offset = neighborPos - currentRayPos;
     
-    float maxDist = sqrt(3.0) * float(ringSize);
-    float sigma = maxDist / 2.5; // 2.5*sigma, gaussian ≈ 0.01
+    // Compute distance based on selected metric
+    float dist = computeDistance(offset);
+    float maxDist = getMaxDistance(ringSize);
     
-    // 3d gaussian convolution: G(x,y,z) = G(x) * G(y) * G(z)
-    return computeGaussianConvolutionWeight(offset, sigma);
+    // Compute sigma so that at maxDist, gaussian = minEdgeWeight
+    // G(maxDist) = exp(-(maxDist²) / (2*sigma²)) = minEdgeWeight
+    // sigma = maxDist / sqrt(-2 * ln(minEdgeWeight))
+    float sigma = (minEdgeWeight > 0.0001) ? (maxDist / sqrt(-2.0 * log(minEdgeWeight))) : (maxDist / 2.5);
+    
+    // Gaussian falloff
+    return exp(-(dist * dist) / (2.0 * sigma * sigma));
 }
 
 // ray-centric distance weight: perpendicular distance to ray
@@ -124,14 +161,16 @@ float computeDistanceWeight(vec3 point, vec3 rayOrigin, vec3 rayDirection, int r
     vec3 toPoint = point - rayOrigin;
     vec3 projection = dot(toPoint, rayDirection) * rayDirection;
     vec3 perpendicular = toPoint - projection;
-    float perpDist = length(perpendicular);
     
-    // lower is more tight falloff, higher is more gentle
-    float maxDist = sqrt(distanceWeightMultiplier) * float(ringSize);
+    // Compute distance based on selected metric
+    float dist = computeDistance(perpendicular);
+    float maxDist = getMaxDistance(ringSize);
     
-    // linear falloff, 1.0 at center to 0.0 at edge
-    float weight = 1.0 - (perpDist / maxDist);
-    return max(0.0, weight);
+    // Normalized distance [0, 1]
+    float t = clamp(dist / maxDist, 0.0, 1.0);
+    
+    // Linear interpolation: 1.0 at center, minEdgeWeight at edge
+    return mix(1.0, minEdgeWeight, t);
 }
 
 // voxel-centric distance weight: distance from center voxel
@@ -141,12 +180,17 @@ float computeVoxelCentricWeight(vec3 neighborPos, vec3 currentRayPos, int ringSi
     }
     
     // Linear falloff (falloffMode == 0)
-    float dist = distance(neighborPos, currentRayPos);
-    float maxDist = sqrt(3.0) * float(ringSize); // diagonal of neighborhood
+    vec3 offset = neighborPos - currentRayPos;
     
-    // linear falloff, 1.0 at center to 0.0 at edge
-    float weight = 1.0 - (dist / maxDist);
-    return max(0.0, weight);
+    // Compute distance based on selected metric
+    float dist = computeDistance(offset);
+    float maxDist = getMaxDistance(ringSize);
+    
+    // Normalized distance [0, 1]
+    float t = clamp(dist / maxDist, 0.0, 1.0);
+    
+    // Linear interpolation: 1.0 at center, minEdgeWeight at edge
+    return mix(1.0, minEdgeWeight, t);
 }
 
 int getNeighborsVoxel(ivec3 coord, int ringSize, out vec3 neighbors[MAX_NEIGHBORS]) {
@@ -205,6 +249,8 @@ int getNeighborsSpherical(vec3 point, float radius, out vec3 neighbors[MAX_NEIGH
                 vec3 voxel_center = vec3(neighbor_coord) + 0.5;
                 float dist = distance(point, voxel_center);
                 
+                // Include all voxels within radius
+                // (soft boundary multiplier applied later if enabled)
                 if (dist <= radius) {
                     neighbors[count] = voxel_center;
                     count++;
@@ -1241,13 +1287,30 @@ bool traceSphere(ivec3 voxel, vec3 rayOrigin, vec3 rayDir, vec3 tMax, vec3 delta
 
 bool traceQuadric(ivec3 voxel, vec3 rayOrigin, vec3 rayDir, vec3 tMax, vec3 deltaT) {
     int neighborCount;
+    vec3 neighborhoodCenter;
+    
+    // Determine neighborhood center
+    // Overlapping neighborhoods: each pixel has its own neighborhood centered at ray intersection
+    // Non-overlapping: all pixels in a voxel share the same neighborhood centered at voxel center
+    if (useOverlappingNeighborhoods) {
+        // Use ray intersection point as neighborhood center (per-pixel neighborhoods)
+        neighborhoodCenter = findSamplePoint(voxel, rayOrigin, rayDir, tMax, deltaT);
+    } else {
+        // Use voxel center as neighborhood center (per-voxel neighborhoods)
+        neighborhoodCenter = vec3(voxel) + 0.5;
+    }
     
     // Get neighbors
     if (useSphericalNeighborhood == 1) {
-        vec3 samplePoint = findSamplePoint(voxel, rayOrigin, rayDir, tMax, deltaT);
-        neighborCount = getNeighborsSpherical(samplePoint, sphericalRadius, g_neighbors);
+        neighborCount = getNeighborsSpherical(neighborhoodCenter, sphericalRadius, g_neighbors);
     } else {
-        neighborCount = getNeighborsVoxel(voxel, neighborhoodRingSize, g_neighbors);
+        // For cubic neighborhoods with overlapping, use spherical sampling around intersection point
+        // (no natural grid alignment when center is not at voxel center)
+        if (useOverlappingNeighborhoods) {
+            neighborCount = getNeighborsSpherical(neighborhoodCenter, float(neighborhoodRingSize) * sqrt(3.0), g_neighbors);
+        } else {
+            neighborCount = getNeighborsVoxel(voxel, neighborhoodRingSize, g_neighbors);
+        }
     }
 
     // Check if we have enough points (need 9 for general quadric)
@@ -1259,16 +1322,69 @@ bool traceQuadric(ivec3 voxel, vec3 rayOrigin, vec3 rayDir, vec3 tMax, vec3 delt
 
     // plane is degenerate quadric, dont check for coplanar
 
-    // Initialize weights (ray-centric distance weighting)
-    if (useDistanceWeighting) {
+    // Compute effective radius for soft boundary
+    float effectiveRadius = (useSphericalNeighborhood == 1) ? sphericalRadius : (float(neighborhoodRingSize) * sqrt(3.0));
+    
+    // Initialize weights
+    if (useVoxelCentricWeighting) {
+        // Voxel-centric: iteratively find closest point on surface
+        vec3 samplePoint = findSamplePoint(voxel, rayOrigin, rayDir, tMax, deltaT);
+        vec3 currentRayPos = samplePoint;
+        
+        // Iterative refinement to find voxel-centric point
+        for (int iter = 0; iter < voxelCentricMaxIterations; iter++) {
+            vec3 weightedCenter = vec3(0.0);
+            float totalWeight = 0.0;
+            float effectiveRingSize = (useSphericalNeighborhood == 1) ? sphericalRadius : float(neighborhoodRingSize);
+            int ringSize = int(effectiveRingSize);
+            
+            for (int i = 0; i < neighborCount; i++) {
+                float w = computeVoxelCentricWeight(g_neighbors[i], currentRayPos, ringSize);
+                weightedCenter += w * g_neighbors[i];
+                totalWeight += w;
+            }
+            
+            if (totalWeight > 0.0) {
+                weightedCenter /= totalWeight;
+            }
+            
+            if (distance(weightedCenter, currentRayPos) < voxelCentricEpsilon) {
+                break;
+            }
+            
+            currentRayPos += voxelCentricStepSize * (weightedCenter - currentRayPos);
+        }
+        
+        // Compute final weights based on converged position
+        float effectiveRingSize = (useSphericalNeighborhood == 1) ? sphericalRadius : float(neighborhoodRingSize);
+        int ringSize = int(effectiveRingSize);
+        for (int i = 0; i < neighborCount; i++) {
+            g_weights[i] = computeVoxelCentricWeight(g_neighbors[i], currentRayPos, ringSize);
+        }
+    } else if (useDistanceWeighting) {
+        // Ray-centric distance weighting
         float effectiveRingSize = (useSphericalNeighborhood == 1) ? sphericalRadius : float(neighborhoodRingSize);
         int ringSize = int(effectiveRingSize);
         for (int i = 0; i < neighborCount; i++) {
             g_weights[i] = computeDistanceWeight(g_neighbors[i], rayOrigin, rayDir, ringSize);
         }
     } else {
+        // Uniform weights
         for (int i = 0; i < neighborCount; i++) {
             g_weights[i] = 1.0;
+        }
+    }
+    
+    // Apply soft boundary weight multiplier if enabled
+    // This creates a smooth gradient from center (1.0) to boundary (0.0)
+    // Applied multiplicatively on top of existing weights (uniform/ray-centric/voxel-centric)
+    if (useSoftNeighborhoodBoundary) {
+        for (int i = 0; i < neighborCount; i++) {
+            float dist = distance(neighborhoodCenter, g_neighbors[i]);
+            // Linear falloff: 1.0 at center, 0.0 at radius
+            float boundaryMultiplier = 1.0 - (dist / effectiveRadius);
+            boundaryMultiplier = clamp(boundaryMultiplier, 0.0, 1.0);
+            g_weights[i] *= boundaryMultiplier;
         }
     }
 
